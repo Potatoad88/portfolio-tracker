@@ -160,7 +160,8 @@ class PersistenceTests(unittest.TestCase):
                     INSERT INTO sync_state VALUES (1, 'saved', NULL);
                 """)
             upgraded = Database(path)
-            self.assertEqual(upgraded.one("SELECT last_success,components FROM sync_state WHERE id=1"), {"last_success": "saved", "components": "{}"})
+            self.assertEqual(upgraded.one("SELECT last_success,components,cash_flow_checked_through FROM sync_state WHERE id=1"),
+                             {"last_success": "saved", "components": "{}", "cash_flow_checked_through": "saved"})
             self.assertIn("sgd_to_usd", {row["name"] for row in upgraded.rows("PRAGMA table_info(history)")})
             self.assertIn("asset_type", {row["name"] for row in upgraded.rows("PRAGMA table_info(positions)")})
         finally:

@@ -49,6 +49,8 @@ class Database:
                 db.execute("ALTER TABLE sync_state ADD COLUMN components TEXT NOT NULL DEFAULT '{}'")
             if "cash_flow_checked_through" not in state_columns:
                 db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_checked_through TEXT")
+            db.execute("""UPDATE sync_state SET cash_flow_checked_through=substr(last_success,1,10)
+                       WHERE cash_flow_checked_through IS NULL AND last_success IS NOT NULL""")
             funding_columns = {row[1] for row in db.execute("PRAGMA table_info(funding_transactions)")}
             for column, definition in (("direction", "TEXT NOT NULL DEFAULT ''"),
                                        ("settlement_date", "TEXT"),
