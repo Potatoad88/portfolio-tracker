@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -254,9 +254,22 @@ class MoomooAdapterTests(unittest.TestCase):
         self.adapter(client).fetch(date.today().isoformat(), ["2024-03-26", "2024-03-26"])
         self.assertEqual(client.cash_flow_dates, ["2024-03-26", date.today().isoformat()])
 
+    def test_cash_flow_end_limits_the_queried_range(self):
+        client = self.Client()
+        self.adapter(client).fetch("2026-01-01", history_end="2026-01-02")
+        self.assertEqual(client.cash_flow_dates, ["2026-01-01", "2026-01-02"])
+
     def test_query_failure_closes_context_and_preserves_safe_message(self):
         client = self.Client(fail_positions=True)
         with self.assertRaisesRegex(MoomooError, "OpenD unavailable"):
+            self.adapter(client).fetch(date.today().isoformat())
+        self.assertTrue(client.closed)
+
+    def test_invalid_required_number_has_moomoo_error(self):
+        client = self.Client()
+        original = client.accinfo_query
+        client.accinfo_query = lambda currency, **kwargs: (0, [{"total_assets": "NaN"}]) if currency == "SGD" else original(currency, **kwargs)
+        with self.assertRaisesRegex(MoomooError, "Moomoo returned an invalid total assets"):
             self.adapter(client).fetch(date.today().isoformat())
         self.assertTrue(client.closed)
 
@@ -344,6 +357,27 @@ class EndpointTests(unittest.TestCase):
         with patch.dict(os.environ, {"MOOMOO_MANUAL_WITHDRAWALS": "2026-01-03:50"}):
             result = main.summary("SGD", "moomoo")
         self.assertEqual(result["netContributions"], "350")
+
+    def test_moomoo_sync_advances_old_checkpoint_by_twenty_days(self):
+        start = date.today() - timedelta(days=30)
+        with main.moomoo_db.connect() as db:
+            db.execute("UPDATE sync_state SET cash_flow_checked_through=? WHERE id=1", (start.isoformat(),))
+        calls = []
+
+        class Client:
+            components = {"cash_flow": "ok"}
+
+            def fetch(self, *args):
+                calls.append(args)
+                return replace(snapshot(), positions=()), [], []
+
+        with patch.dict(os.environ, {"MOOMOO_CASH_FLOW_DATES": ""}), patch.object(main, "MoomooAdapter", return_value=Client()):
+            main.sync("moomoo")
+        expected_start = start + timedelta(days=1)
+        expected_end = expected_start + timedelta(days=19)
+        self.assertEqual(calls[0], (expected_start.isoformat(), [], expected_end.isoformat()))
+        self.assertEqual(main.moomoo_db.one("SELECT cash_flow_checked_through FROM sync_state WHERE id=1")["cash_flow_checked_through"],
+                         expected_end.isoformat())
 
     def test_invalid_broker_is_rejected(self):
         with self.assertRaisesRegex(main.HTTPException, "Broker must be"):

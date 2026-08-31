@@ -2,7 +2,7 @@ import csv
 import io
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -67,28 +67,31 @@ def contribution_items(store: Database, broker: str) -> list[Funding]:
 def sync(broker: str = "tiger"):
     store = database(broker)
     try:
-        client = tiger_adapter() if broker == "tiger" else MoomooAdapter()
         latest = store.one("SELECT captured_at FROM history ORDER BY captured_at DESC LIMIT 1")
         cash_flow_dates: list[str] = []
         cash_flow_checked_through = None
+        cash_flow_end = ""
         if broker == "moomoo":
             latest_flow = store.one("SELECT max(business_date) value FROM funding_transactions")
             days = min(max(int(os.getenv("MOOMOO_CASH_FLOW_DAYS", "20")), 1), 20)
-            today = datetime.now(timezone.utc).date()
+            today = date.today()
             state = store.one("SELECT cash_flow_checked_through FROM sync_state WHERE id=1") or {}
             checkpoint = state.get("cash_flow_checked_through")
             lookback = (today - timedelta(days=days - 1)).isoformat()
-            history_start = max((datetime.fromisoformat(checkpoint).date() + timedelta(days=1)).isoformat(), lookback) if checkpoint else (today.isoformat() if latest_flow and latest_flow["value"] else lookback)
+            history_start = (date.fromisoformat(checkpoint) + timedelta(days=1)).isoformat() if checkpoint else (today.isoformat() if latest_flow and latest_flow["value"] else lookback)
             history_start = min(history_start, today.isoformat())
+            cash_flow_end = min(date.fromisoformat(history_start) + timedelta(days=19), today).isoformat()
             configured = {value.strip() for value in os.getenv("MOOMOO_CASH_FLOW_DATES", "").split(",") if value.strip()}
             stored = {row["business_date"] for row in store.rows("SELECT DISTINCT business_date FROM funding_transactions")}
             cash_flow_dates = sorted(configured - stored)
             if cash_flow_dates:
                 history_start = today.isoformat()
-            cash_flow_checked_through = today.isoformat()
+                cash_flow_end = today.isoformat()
+            cash_flow_checked_through = cash_flow_end
         else:
             history_start = (datetime.fromisoformat(latest["captured_at"]).date() - timedelta(days=1)).isoformat() if latest else "2015-01-01"
-        snapshot, funding_rows, history_rows = client.fetch(history_start, cash_flow_dates) if broker == "moomoo" else client.fetch(history_start)
+        client = tiger_adapter() if broker == "tiger" else MoomooAdapter()
+        snapshot, funding_rows, history_rows = client.fetch(history_start, cash_flow_dates, cash_flow_end) if broker == "moomoo" else client.fetch(history_start)
         if broker == "tiger":
             net_contributions(funding_rows)
         if snapshot.reporting_currency != "SGD":

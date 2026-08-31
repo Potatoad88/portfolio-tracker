@@ -41,7 +41,10 @@ def _value(obj: Any, *names: str, default: Any = None) -> Any:
 
 def _decimal(value: Any, field: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
+        if not result.is_finite():
+            raise ValueError
+        return result
     except Exception as exc:
         raise TigerError(f"Tiger returned an invalid {field}") from exc
 

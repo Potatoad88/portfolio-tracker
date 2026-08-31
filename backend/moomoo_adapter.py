@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from adapter import _decimal, _records, _value
+from adapter import _records, _value
 from models import Funding, Position, Snapshot
 
 
@@ -22,6 +22,16 @@ def _number(value: Any, default: Decimal = Decimal()) -> Decimal:
         return result if math.isfinite(float(result)) else default
     except Exception:
         return default
+
+
+def _required_number(value: Any, field: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+        if not result.is_finite():
+            raise ValueError
+        return result
+    except Exception as exc:
+        raise MoomooError(f"Moomoo returned an invalid {field}") from exc
 
 
 class MoomooAdapter:
@@ -65,7 +75,7 @@ class MoomooAdapter:
             raise MoomooError(f"Moomoo returned no {currency} account assets")
         return rows[0]
 
-    def fetch(self, history_start: str = "", extra_cash_flow_dates: list[str] | None = None):
+    def fetch(self, history_start: str = "", extra_cash_flow_dates: list[str] | None = None, history_end: str = ""):
         try:
             accounts = self._query("account", self.client.get_acc_list)
             if not any(int(_value(row, "acc_id", default=0)) == self.account and str(_value(row, "trd_env", default="")).upper().endswith("REAL") for row in accounts):
@@ -80,8 +90,8 @@ class MoomooAdapter:
             for currency in currencies - {"SGD"}:
                 if hasattr(self.sdk.Currency, currency):
                     assets[currency] = self._funds(currency)
-            total = _decimal(_value(sgd_assets, "total_assets"), "Moomoo total assets")
-            rates = {currency: total / _decimal(_value(row, "total_assets"), f"Moomoo {currency} assets")
+            total = _required_number(_value(sgd_assets, "total_assets"), "total assets")
+            rates = {currency: total / _required_number(_value(row, "total_assets"), f"{currency} assets")
                      for currency, row in assets.items() if _number(_value(row, "total_assets")) != 0}
             rates["SGD"] = Decimal("1")
             positions = tuple(self._position(row, rates) for row in raw_positions)
@@ -92,14 +102,15 @@ class MoomooAdapter:
             if fund_assets > 0 and abs(total - cash - position_total - fund_assets) < abs(total - cash - position_total):
                 positions += (Position("MOOMOO_FUNDS", "Moomoo fund assets", "SG", "SGD", Decimal("1"),
                                        fund_assets, fund_assets, fund_assets, Decimal(), "FUND"),)
-            usd_total = _decimal(_value(assets["USD"], "total_assets"), "Moomoo USD assets")
+            usd_total = _required_number(_value(assets["USD"], "total_assets"), "USD assets")
             snapshot = Snapshot(datetime.now(timezone.utc), "SGD", total, cash, total - cash,
                                 sum((position.unrealized_pnl for position in positions), Decimal()), Decimal(),
                                 positions, Decimal("1") if total == 0 else usd_total / total)
             flows = []
             current = date.fromisoformat(history_start) if history_start else date.today()
+            end = date.fromisoformat(history_end) if history_end else date.today()
             dates = set(extra_cash_flow_dates or [])
-            while current <= date.today():
+            while current <= end:
                 dates.add(current.isoformat())
                 current += timedelta(days=1)
             if len(dates) > 20:
@@ -128,7 +139,7 @@ class MoomooAdapter:
         rate = rates[currency]
         market = symbol.split(".", 1)[0] if "." in symbol else str(_value(row, "position_market", default=""))
         return Position(symbol, str(_value(row, "stock_name", default=symbol)), market, currency,
-                        _decimal(_value(row, "qty", default=0), "Moomoo quantity"),
+                        _required_number(_value(row, "qty", default=0), "quantity"),
                         _number(_value(row, "average_cost", "cost_price")) * rate,
                         _number(_value(row, "nominal_price")) * rate,
                         _number(_value(row, "market_val")) * rate,
@@ -144,6 +155,6 @@ class MoomooAdapter:
             raise MoomooError("Moomoo returned cash flow without a clearing date")
         settlement = str(_value(row, "settlement_date", default=""))[:10]
         return Funding(str(flow_id), str(_value(row, "cashflow_type", default="Others")),
-                       str(_value(row, "currency")), _decimal(_value(row, "cashflow_amount"), "Moomoo cash flow amount"),
+                       str(_value(row, "currency")), _required_number(_value(row, "cashflow_amount"), "cash-flow amount"),
                        date.fromisoformat(raw_date), True, str(_value(row, "cashflow_direction", default="")),
                        date.fromisoformat(settlement) if settlement else None, str(_value(row, "cashflow_remark", default="")))
