@@ -11,7 +11,8 @@ from models import Funding, HistoryPoint, Snapshot
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS funding_transactions (
  transaction_id TEXT PRIMARY KEY, type TEXT NOT NULL, currency TEXT NOT NULL, amount TEXT NOT NULL,
- business_date TEXT NOT NULL, completed INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+ business_date TEXT NOT NULL, completed INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ direction TEXT NOT NULL DEFAULT '', settlement_date TEXT, remark TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
  id INTEGER PRIMARY KEY, captured_at TEXT NOT NULL, reporting_currency TEXT NOT NULL, total_equity TEXT NOT NULL,
  cash TEXT NOT NULL, holdings_value TEXT NOT NULL, unrealized_pnl TEXT NOT NULL, realized_pnl TEXT NOT NULL,
@@ -45,6 +46,12 @@ class Database:
             state_columns = {row[1] for row in db.execute("PRAGMA table_info(sync_state)")}
             if "components" not in state_columns:
                 db.execute("ALTER TABLE sync_state ADD COLUMN components TEXT NOT NULL DEFAULT '{}'")
+            funding_columns = {row[1] for row in db.execute("PRAGMA table_info(funding_transactions)")}
+            for column, definition in (("direction", "TEXT NOT NULL DEFAULT ''"),
+                                       ("settlement_date", "TEXT"),
+                                       ("remark", "TEXT NOT NULL DEFAULT ''")):
+                if column not in funding_columns:
+                    db.execute(f"ALTER TABLE funding_transactions ADD COLUMN {column} {definition}")
 
     @contextmanager
     def connect(self):
@@ -64,10 +71,13 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as db:
             for f in funding:
-                db.execute("""INSERT INTO funding_transactions VALUES(?,?,?,?,?,?,?,?)
+                db.execute("""INSERT INTO funding_transactions(transaction_id,type,currency,amount,business_date,completed,created_at,updated_at,direction,settlement_date,remark)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(transaction_id) DO UPDATE SET type=excluded.type,currency=excluded.currency,amount=excluded.amount,
-                    business_date=excluded.business_date,completed=excluded.completed,updated_at=excluded.updated_at""",
-                    (f.transaction_id, f.type, f.currency, str(f.amount), f.business_date.isoformat(), int(f.completed), now, now))
+                    business_date=excluded.business_date,completed=excluded.completed,updated_at=excluded.updated_at,
+                    direction=excluded.direction,settlement_date=excluded.settlement_date,remark=excluded.remark""",
+                    (f.transaction_id, f.type, f.currency, str(f.amount), f.business_date.isoformat(), int(f.completed), now, now,
+                     f.direction, f.settlement_date.isoformat() if f.settlement_date else None, f.remark))
             if self._snapshot_changed(db, snapshot):
                 cur = db.execute("INSERT INTO portfolio_snapshots(captured_at,reporting_currency,total_equity,cash,holdings_value,unrealized_pnl,realized_pnl,sgd_to_usd) VALUES(?,?,?,?,?,?,?,?)",
                                  (snapshot.captured_at.isoformat(), snapshot.reporting_currency, str(snapshot.total_equity), str(snapshot.cash), str(snapshot.holdings_value), str(snapshot.unrealized_pnl), str(snapshot.realized_pnl), str(snapshot.sgd_to_usd)))

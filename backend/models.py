@@ -11,6 +11,9 @@ class Funding:
     amount: Decimal
     business_date: date
     completed: bool
+    direction: str = ""
+    settlement_date: date | None = None
+    remark: str = ""
 
 
 @dataclass(frozen=True)

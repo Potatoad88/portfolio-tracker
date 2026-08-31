@@ -8,11 +8,13 @@ import unittest
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 from calculations import net_contributions, performance
 from adapter import LiveTigerAdapter, _funds_are_excluded
 from database import Database
 from models import Funding, HistoryPoint, Position, Snapshot
+from moomoo_adapter import MoomooAdapter, MoomooError
 import main
 
 
@@ -177,19 +179,108 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(state, {"last_success": before, "last_error": "network failed"})
 
 
+class MoomooAdapterTests(unittest.TestCase):
+    class Sdk:
+        RET_OK = 0
+
+        class TrdEnv:
+            REAL = "REAL"
+
+        class Currency:
+            SGD = "SGD"
+            USD = "USD"
+
+        class CashFlowDirection:
+            NONE = "NONE"
+
+    class Client:
+        def __init__(self, fail_positions=False):
+            self.closed = False
+            self.fail_positions = fail_positions
+            self.cash_flow_dates = []
+
+        def get_acc_list(self):
+            return 0, [{"acc_id": 42, "trd_env": "REAL"}]
+
+        def position_list_query(self, **_):
+            if self.fail_positions:
+                return -1, "OpenD unavailable"
+            return 0, [{"code": "US.TEST", "stock_name": "US holding", "currency": "USD", "qty": 2,
+                        "average_cost": 190, "nominal_price": 200, "market_val": 400, "unrealized_pl": 10},
+                       {"code": "SG.TEST", "stock_name": "SG holding", "currency": "SGD", "qty": 1,
+                        "average_cost": 170, "nominal_price": 175, "market_val": 175, "unrealized_pl": 5}]
+
+        def accinfo_query(self, currency, **_):
+            if currency == "SGD":
+                return 0, [{"total_assets": 1000, "fund_assets": 100, "sg_cash": 100, "us_cash": 100}]
+            return 0, [{"total_assets": 800}]
+
+        def get_acc_cash_flow(self, clearing_date, **_):
+            self.cash_flow_dates.append(clearing_date)
+            if clearing_date != date.today().isoformat():
+                return 0, []
+            return 0, [{"cashflow_id": 7, "clearing_date": clearing_date, "settlement_date": clearing_date,
+                        "currency": "USD", "cashflow_type": "Fund Redemption", "cashflow_direction": "IN",
+                        "cashflow_amount": 12.5, "cashflow_remark": "Raw provider description"}]
+
+        def close(self):
+            self.closed = True
+
+    def adapter(self, client):
+        with patch.dict(os.environ, {"MOOMOO_ACCOUNT_ID": "42"}):
+            return MoomooAdapter(client=client, sdk=self.Sdk)
+
+    def test_mixed_currency_positions_and_aggregate_fund(self):
+        client = self.Client()
+        result, funding_rows, history_rows = self.adapter(client).fetch(date.today().isoformat())
+        self.assertEqual((result.total_equity, result.cash, result.holdings_value),
+                         (Decimal("1000"), Decimal("225.00"), Decimal("775.00")))
+        self.assertEqual(result.sgd_to_usd, Decimal("0.8"))
+        self.assertEqual(result.unrealized_pnl, Decimal("17.50"))
+        self.assertEqual(result.positions[0].market_value, Decimal("500.0"))
+        self.assertEqual(result.positions[-1].asset_type, "FUND")
+        self.assertEqual(history_rows, [])
+        self.assertEqual((funding_rows[0].type, funding_rows[0].direction, funding_rows[0].remark),
+                         ("Fund Redemption", "IN", "Raw provider description"))
+        self.assertEqual(funding_rows[0].amount, Decimal("12.5"))
+        self.assertTrue(client.closed)
+
+    def test_explicit_cash_flow_dates_are_queried_once(self):
+        client = self.Client()
+        self.adapter(client).fetch(date.today().isoformat(), ["2024-03-26", "2024-03-26"])
+        self.assertEqual(client.cash_flow_dates, ["2024-03-26", date.today().isoformat()])
+
+    def test_query_failure_closes_context_and_preserves_safe_message(self):
+        client = self.Client(fail_positions=True)
+        with self.assertRaisesRegex(MoomooError, "OpenD unavailable"):
+            self.adapter(client).fetch(date.today().isoformat())
+        self.assertTrue(client.closed)
+
+    def test_non_local_opend_is_rejected(self):
+        with patch.dict(os.environ, {"MOOMOO_ACCOUNT_ID": "42", "MOOMOO_HOST": "example.com"}):
+            with self.assertRaisesRegex(MoomooError, "localhost"):
+                MoomooAdapter(client=self.Client(), sdk=self.Sdk)
+
+
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         handle, self.path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
-        self.original_db, main.db = main.db, Database(self.path)
+        second_handle, self.moomoo_path = tempfile.mkstemp(suffix=".db")
+        os.close(second_handle)
+        self.original_db, self.original_moomoo_db = main.db, main.moomoo_db
+        main.db, main.moomoo_db = Database(self.path), Database(self.moomoo_path)
         captured = datetime(2026, 1, 3, tzinfo=timezone.utc)
         main.db.sync(snapshot().__class__(captured, "SGD", Decimal("100"), Decimal("88"), Decimal("12"), Decimal("2"), Decimal("0"), snapshot().positions, Decimal("0.75")),
                      FUNDING, [HistoryPoint(datetime(2026, 1, 1, tzinfo=timezone.utc), Decimal("100"), Decimal("0.80")),
                                HistoryPoint(datetime(2026, 1, 2, tzinfo=timezone.utc), Decimal("95"), Decimal("0.70"))])
+        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+                                    holdings_value=Decimal("150"), positions=()), [], [])
 
     def tearDown(self):
-        main.db = self.original_db
+        main.db, main.moomoo_db = self.original_db, self.original_moomoo_db
         os.unlink(self.path)
+        os.unlink(self.moomoo_path)
 
     def test_summary_reconciles_and_converts_currency(self):
         sgd, usd = main.summary("SGD"), main.summary("USD")
@@ -218,6 +309,39 @@ class EndpointTests(unittest.TestCase):
     def test_unknown_export_is_rejected(self):
         with self.assertRaisesRegex(main.HTTPException, "Export must be"):
             main.export_csv("secrets", "SGD")
+
+    def test_broker_data_and_capabilities_are_isolated(self):
+        tiger, moomoo = main.summary("SGD"), main.summary("SGD", "moomoo")
+        self.assertEqual(tiger["totalEquity"], "100")
+        self.assertTrue(tiger["supportsContributions"])
+        self.assertEqual(moomoo["totalEquity"], "200")
+        self.assertTrue(moomoo["supportsContributions"])
+        self.assertEqual(moomoo["netContributions"], "0")
+
+    def test_moomoo_cash_flow_remains_raw_and_excluded_from_contributions(self):
+        flow = Funding("flow-1", "Fund Redemption", "USD", Decimal("12.5"), date(2026, 1, 2), True,
+                       "IN", date(2026, 1, 3), "Provider remark")
+        main.moomoo_db.sync(replace(snapshot(), positions=()), [flow], [])
+        row = main.funding("SGD", "moomoo")[0]
+        self.assertEqual((row["amount"], row["display_currency"], row["direction"], row["remark"]),
+                         ("12.5", "USD", "IN", "Provider remark"))
+        self.assertEqual(main.summary("SGD", "moomoo")["netContributions"], "0")
+
+    def test_moomoo_contributions_include_only_verified_transfers(self):
+        flows = [
+            Funding("deposit", "Others", "SGD", Decimal("500"), date(2026, 1, 1), True, "IN", remark="DDIIRGPC123"),
+            Funding("withdrawal", "Bank Transfer Withdrawals", "SGD", Decimal("-100"), date(2026, 1, 2), True, "OUT"),
+            Funding("legacy", "Others", "SGD", Decimal("-50"), date(2026, 1, 3), True, "OUT", remark="legacy"),
+            Funding("fund", "Fund Redemption", "SGD", Decimal("999"), date(2026, 1, 3), True, "IN"),
+        ]
+        main.moomoo_db.sync(replace(snapshot(), positions=()), flows, [])
+        with patch.dict(os.environ, {"MOOMOO_MANUAL_WITHDRAWALS": "2026-01-03:50"}):
+            result = main.summary("SGD", "moomoo")
+        self.assertEqual(result["netContributions"], "350")
+
+    def test_invalid_broker_is_rejected(self):
+        with self.assertRaisesRegex(main.HTTPException, "Broker must be"):
+            main.summary("SGD", "other")
 
 
 if __name__ == "__main__":

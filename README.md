@@ -1,23 +1,32 @@
-# Tiger Portfolio Tracker
+# Portfolio Tracker
 
-A local, read-only dashboard for a Tiger Brokers Prime account. It displays current equity, cash, stocks, ETFs, funds, funding history, and contribution-adjusted performance in SGD or USD.
+A local, read-only dashboard for Tiger Brokers Prime and Moomoo SG accounts. Broker tabs share one interface while keeping their credentials, refresh operations, sync health, exports, and SQLite data isolated.
 
-The browser talks only to the local FastAPI backend. Tiger credentials, the private key, and Tiger API calls stay in the backend process.
+The browser talks only to the local FastAPI backend. Tiger credentials remain in the backend process; Moomoo credentials remain inside Moomoo OpenD.
 
-## What it does
+## Features
 
-- Fetches Prime assets, stock positions, fund positions, funding transactions, and analytics through the official `tigeropen` SDK.
-- Stores successful results in a local SQLite database so a failed refresh cannot erase the last good data.
-- Converts the entire dashboard using Tiger's account-level SGD/USD rates. Historical chart points use their own historical rates when Tiger supplies them.
-- Separates stocks and ETFs from money-market and other fund positions.
-- Exports positions, funding, and history as CSV without making another Tiger request.
-- Remembers the selected currency and light/dark theme in browser storage.
+- Tiger assets, stocks, funds, funding transactions, and analytics through the official `tigeropen` SDK.
+- Moomoo SG assets and positions through the official `moomoo-api` SDK and local OpenD.
+- Separate Tiger and Moomoo tabs with persistent broker, currency, and theme preferences.
+- SGD/USD display, interactive local history, collapsible holdings, reconciliation warnings, CSV export, and SQLite backups.
+- Atomic syncs that preserve the previous broker snapshot when an upstream request fails.
 
-It does not place orders, stream quotes, or expose a public server.
+The application has no order, trade-unlock, deal, quote, or streaming code and binds only to localhost.
+
+## API cost boundary
+
+Moomoo advertises its developer platform as **“$0 Cost”** and states **“No additional API charges.”** Some real-time quote products require paid quote cards; this project does not create a quote context or request market data. It uses only account-list, account-funds, and cached position reads. Normal account, fund, custody, or executed-trade fees still apply independently of this dashboard.
+
+- [Moomoo Developer Platform](https://open.moomoo.com/)
+- [Moomoo OpenAPI fee documentation](https://openapi.moomoo.com/pdfs/moomoo-API-Doc-en-Python.pdf)
+- [Moomoo trade API overview](https://openapi.moomoo.com/moomoo-api-doc/en/trade/overview.html)
+
+Tiger likewise advertises free API-service access. The Tiger integration uses only account and history queries. [Tiger Open Platform](https://developer.itigerup.com/?lang=en_US&navType=quant_trading)
 
 ## Setup
 
-Requires Python 3.10+ and Node.js 18+.
+Requires Python 3.10+, Node.js 18+, and Moomoo OpenD 10.10+ for the Moomoo tab.
 
 ```sh
 python3 -m venv .venv
@@ -27,7 +36,7 @@ npm --prefix frontend install
 cp .env.example .env
 ```
 
-Fill in `.env`:
+Configure `.env`:
 
 ```dotenv
 TIGER_ID=your_tiger_id
@@ -35,91 +44,118 @@ TIGER_ACCOUNT=your_account_number
 TIGER_PRIVATE_KEY_PATH=/absolute/path/to/your/private_key.pem
 TIGER_DB_PATH=backend/portfolio.db
 TIGER_STALE_MINUTES=60
+
+MOOMOO_HOST=127.0.0.1
+MOOMOO_PORT=11111
+MOOMOO_ACCOUNT_ID=your_real_sg_account_id
+MOOMOO_DB_PATH=backend/moomoo.db
+MOOMOO_CASH_FLOW_DAYS=20
+MOOMOO_CASH_FLOW_DATES=
+MOOMOO_MANUAL_WITHDRAWALS=
 ```
 
-Use the private key format accepted by the Tiger SDK. Keep the PEM outside the repository if practical. The PEM, `.env`, databases, and backups are ignored by Git.
+Keep the Tiger PEM outside the repository if practical. `.env`, PEM/key formats, databases, and backups are ignored by Git.
+
+### Moomoo OpenD
+
+1. Download and install the current visual Moomoo OpenD from the [official OpenD documentation](https://openapi.moomoo.com/moomoo-api-doc/en/opend/opend-intro.html).
+2. Log in with the Moomoo account that owns the SG account and complete the API questionnaire/agreement if prompted.
+3. Leave OpenD listening on `127.0.0.1:11111`; do not expose it to the network.
+4. Copy the real SG universal securities account ID into `MOOMOO_ACCOUNT_ID`.
+5. OpenD does not need trading to be unlocked because the tracker performs no trading operation.
 
 ## Run
 
-Start the backend and frontend together:
+Start and log in to OpenD first if you intend to refresh Moomoo. Then run:
 
 ```sh
 ./start.sh
 ```
 
-Open <http://127.0.0.1:5173>. Press **Refresh** to request fresh Tiger data. Press `Ctrl+C` in the terminal to stop both servers.
+Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact either broker.
 
-The backend is bound to `127.0.0.1:8000`; the frontend development server is bound to `127.0.0.1:5173`. `start.sh` sets Python's certificate bundle to Certifi's maintained CA store before launching the backend.
+Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be closed separately.
 
-## How data moves
+## Broker behavior
 
-1. Loading the page reads the latest values from the local backend and SQLite database. It does not sync with Tiger.
-2. Pressing **Refresh** sends `POST /api/sync`.
-3. The backend signs read-only Tiger requests with the private key and verifies Tiger's HTTPS certificate using the Certifi CA bundle.
-4. The adapter normalizes Tiger's response shapes and converts position values to the SGD storage currency.
-5. All funding, history, snapshot, position, and sync-status changes commit in one SQLite transaction. On failure, the transaction rolls back and the previous data remains available.
-6. After the first full history fetch, later syncs request only the latest history window. An unchanged account does not create a duplicate snapshot.
-7. Changing chart range, currency, theme, or collapsed sections uses already-fetched local data and does not call Tiger.
+### Tiger
+
+- Fetches account assets in SGD/USD, stock/fund positions, funding history, and analytics.
+- Backfills portfolio analytics and then syncs history incrementally.
+- Shows net contributions, overall P&L, simple return, funding history, and contribution-adjusted performance.
+
+### Moomoo
+
+- Targets one real Moomoo SG universal securities account through `SecurityFirm.FUTUSG` and `TrdEnv.REAL`.
+- Reads OpenD's position cache and account assets in the currencies needed to normalize values to SGD; no quote API is used.
+- Shows current total equity, cash, holdings, listed-position unrealized P&L, and an aggregate fund-assets row when Moomoo reports funds outside its position list.
+- Builds equity history locally from changed snapshots beginning with the first successful sync.
+- Shows raw cash-flow records, including Moomoo's type, direction, original currency, amount, and remark.
+- Contribution P&L includes only SGD DDI-tagged deposits, explicit `Bank Transfer Withdrawals`, and locally confirmed `date:amount` entries in `MOOMOO_MANUAL_WITHDRAWALS`. Fund activity, trades, conversions, dividends, interest, and every other cash flow remain excluded.
+- The first sync fetches the most recent `MOOMOO_CASH_FLOW_DAYS` calendar days (maximum 20); later syncs resume from the latest stored clearing date and deduplicate by Moomoo cash-flow ID.
+- Optional comma-separated `MOOMOO_CASH_FLOW_DATES` backfills known clearing dates. Dates already present in the local database are skipped, and no refresh may query more than 20 dates.
+
+Moomoo documents a limit of 10 account-funds requests and 10 position requests per 30 seconds per account, but applies those limits only when `refresh_cache=True`. This tracker always uses `refresh_cache=False`, so refreshes read OpenD's locally synchronized cache. Cash flow is limited separately to 20 daily requests per 30 seconds, which is why the initial lookback is capped at 20 days. See the official [account-funds](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-funds.html), [positions](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-position-list.html), and [cash-flow](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-acc-cash-flow.html) documentation.
 
 ## Calculations
 
-All backend money calculations use Python `Decimal`; values are serialized as strings to avoid binary floating-point drift.
+The backend uses Python `Decimal` and serializes money as strings.
 
-- **Net contributions** = completed deposits − withdrawals − withdrawal fees + withdrawal-related refunds.
-- **Overall P&L** = total equity − net contributions.
-- **Simple overall return** = overall P&L ÷ net contributions × 100. This is not a time-weighted return or XIRR.
-- **Holdings value** = total equity − cash, as reported by Tiger.
-- **Reconciliation difference** = total equity − cash − sum of displayed position market values. Tiger's stock-segment equity excludes separately returned fund positions, so the backend adds fund market value once before reconciling. Differences below one displayed currency unit are treated as valuation timing or rounding noise.
-- **Chart performance** = historical equity − net contributions accumulated through that date.
+- **Tiger net contributions** = completed deposits − withdrawals − withdrawal fees + applicable refunds.
+- **Tiger overall P&L** = total equity − net contributions.
+- **Tiger simple return** = overall P&L ÷ net contributions × 100; it is not TWR or XIRR.
+- **Moomoo net contributions** = verified SGD DDI deposits − explicit and locally confirmed bank withdrawals. Unclassified raw cash flows contribute zero.
+- **Moomoo overall P&L and simple return** use the same formulas as Tiger after that conservative classification.
+- **Holdings value** = total equity − cash.
+- **Reconciliation difference** = total equity − cash − displayed positions.
+- **Moomoo unrealized P&L** = sum of unrealized P&L returned for listed positions; aggregate fund P&L is unavailable.
 
-Supported funding type codes are `1` deposit, `3` withdrawal, `20` withdrawal fee, `21` withdrawal refund, `22` failed-withdrawal refund, and `23` withdrawal-fee refund. Pending transactions and unrecognized types do not affect contributions. Non-SGD funding is rejected because cross-currency cash-flow accounting is not implemented.
+Differences below one displayed currency unit are treated as valuation timing or rounding noise.
 
-## API
+## Local API
 
-| Method | Path | Purpose | Calls Tiger |
+Every endpoint accepts `broker=tiger|moomoo`; omitting it preserves the original Tiger behavior.
+
+| Method | Path | Purpose | Broker request |
 | --- | --- | --- | --- |
-| `POST` | `/api/sync` | Fetch and atomically store fresh account data | Yes |
-| `GET` | `/api/summary?currency=SGD` | Summary cards and reconciliation | No |
-| `GET` | `/api/positions?currency=SGD` | Latest positions | No |
-| `GET` | `/api/funding?currency=SGD` | Funding history with labels | No |
-| `GET` | `/api/history?currency=SGD` | Chart history and funding markers | No |
-| `GET` | `/api/sync/status` | Last success, last error, and component health | No |
-| `GET` | `/api/export/{dataset}` | Download `positions`, `funding`, or `history` as CSV | No |
+| `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store selected broker data | Yes |
+| `GET` | `/api/summary?currency=SGD&broker=moomoo` | Summary and capabilities | No |
+| `GET` | `/api/positions?currency=SGD&broker=moomoo` | Latest positions | No |
+| `GET` | `/api/funding?currency=SGD&broker=tiger` | Tiger funding history | No |
+| `GET` | `/api/history?currency=SGD&broker=moomoo` | Local chart history | No |
+| `GET` | `/api/sync/status?broker=moomoo` | Broker-specific sync health | No |
+| `GET` | `/api/export/{dataset}?broker=moomoo` | Broker-specific CSV | No |
 
-Only `SGD` and `USD` are accepted as display currencies.
+Only SGD and USD are accepted as display currencies.
 
 ## Codebase map
 
 ```text
 backend/
-  adapter.py       Tiger SDK configuration, read-only requests, normalization
-  calculations.py  Contribution and performance formulas
-  database.py      SQLite schema, migrations, atomic persistence, deduplication
-  main.py          FastAPI endpoints and display-currency conversion
-  models.py        Immutable normalized data records
-  tests/test_app.py
+  adapter.py          Tiger read-only normalization
+  moomoo_adapter.py   Moomoo/OpenD read-only normalization
+  calculations.py     Contribution and performance formulas
+  database.py         SQLite schema, transactions, and deduplication
+  main.py             Broker-aware FastAPI endpoints
+  models.py           Immutable normalized records
 frontend/src/
-  App.tsx           Dashboard, chart, tables, exports, and local preferences
-  main.tsx          React entry point and MUI theme
+  App.tsx              Shared broker-tab dashboard
+  main.tsx             Theme and React entry point
 scripts/
-  backup_database.py
-start.sh            Starts both local servers
-backup.sh           Creates a consistent SQLite backup
+  backup_database.py   Consistent broker database backups
 ```
 
-The adapter is the trust boundary for changing Tiger SDK response formats. The database stores all monetary fields as decimal text. The frontend treats API monetary values as display data; financial formulas remain in the backend.
+Adapters are the trust boundaries for broker response formats. Tiger uses `backend/portfolio.db`; Moomoo uses `backend/moomoo.db`.
 
 ## Export and backup
 
-Use **Export** in the dashboard to download current local data. The selected dashboard currency controls the export currency.
-
-Create a consistent SQLite backup while the app is running or stopped:
+Dashboard exports use only the selected broker's local database. Moomoo's funding export contains raw cash-flow records and does not classify them as contributions.
 
 ```sh
 ./backup.sh
 ```
 
-Backups are written to `backups/`. Only the database is copied; `.env` and the private key are not included.
+The command backs up every broker database that exists into the ignored `backups/` directory. It never copies `.env` or the Tiger private key.
 
 ## Tests and build
 
@@ -128,14 +164,16 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
-The backend suite covers contribution signs and statuses, currency normalization, fund classification, transactional rollback, snapshot deduplication, changed snapshots, historical FX, reconciliation, and CSV export.
+Tests cover financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
 
 ## Troubleshooting
 
-- **`Incorrect padding`**: the private key content or format is malformed. Point `TIGER_PRIVATE_KEY_PATH` at the PEM file rather than pasting an altered one-line value.
-- **Certificate verification failed**: reinstall the virtual environment requirements and launch through `./start.sh`, which uses Certifi's CA bundle. Do not disable TLS verification.
-- **`502 Bad Gateway` after Refresh**: open Sync health and inspect the displayed error. Previously synced data remains available.
-- **Portfolio data may be stale**: the last successful Tiger sync is older than `TIGER_STALE_MINUTES`. Page reloads read local data; use **Refresh** for a new Tiger sync.
-- **Reconciliation warning**: Tiger total equity does not equal cash plus the positions returned by the stock and fund endpoints. Refresh once; if it persists, an asset category may not be returned by those endpoints.
+- **Moomoo OpenD connection failed**: start OpenD, log in, verify port `11111`, and keep it on localhost.
+- **Account ID is not available**: confirm `MOOMOO_ACCOUNT_ID` is the real SG securities account exposed by the logged-in OpenD user.
+- **Moomoo data appears unchanged**: position and account reads intentionally use OpenD's synchronized cache. Restart or refresh OpenD if its cache is stale.
+- **Tiger `Incorrect padding`**: point `TIGER_PRIVATE_KEY_PATH` at the original PEM rather than pasting an altered one-line key.
+- **Certificate verification failed**: reinstall requirements and use `./start.sh`, which supplies Certifi's CA bundle; never disable TLS verification.
+- **Stale warning**: the selected broker's last successful sync is older than `TIGER_STALE_MINUTES`.
+- **Reconciliation warning**: refresh once; if it persists, the broker may report an unsupported or in-transit asset outside returned positions.
 
-Tiger can change SDK response shapes and account capabilities. Validate the figures against Tiger after SDK upgrades before relying on them for financial decisions.
+Broker SDKs and account capabilities can change. Compare results with the official apps after dependency upgrades before relying on the figures for financial decisions.

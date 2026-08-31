@@ -13,9 +13,9 @@ def net_contributions(items: list[Funding]) -> Decimal:
     for item in items:
         if not item.completed:
             continue
-        if item.currency.upper() != "SGD":
-            raise ValueError(f"Unexpected funding currency {item.currency}; only SGD is supported")
         kind = item.type.upper()
+        if kind in DEPOSIT_TYPES | WITHDRAWAL_TYPES | FEE_TYPES | REFUND_TYPES and item.currency.upper() != "SGD":
+            raise ValueError(f"Unexpected funding currency {item.currency}; only SGD is supported")
         if kind in DEPOSIT_TYPES:
             total += abs(item.amount)
         elif kind in WITHDRAWAL_TYPES or kind in FEE_TYPES:
