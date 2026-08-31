@@ -84,7 +84,7 @@ Supported funding type codes are `1` deposit, `3` withdrawal, `20` withdrawal fe
 | `GET` | `/api/funding?currency=SGD` | Funding history with labels | No |
 | `GET` | `/api/history?currency=SGD` | Chart history and funding markers | No |
 | `GET` | `/api/sync/status` | Last success, last error, and component health | No |
-| `GET` | `/api/export/{positions|funding|history}` | Download local data as CSV | No |
+| `GET` | `/api/export/{dataset}` | Download `positions`, `funding`, or `history` as CSV | No |
 
 Only `SGD` and `USD` are accepted as display currencies.
 
