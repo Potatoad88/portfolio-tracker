@@ -1,98 +1,1255 @@
-import { PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useState } from 'react'
-import DarkModeOutlined from '@mui/icons-material/DarkModeOutlined'
-import ExpandMore from '@mui/icons-material/ExpandMore'
-import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
-import InfoOutlined from '@mui/icons-material/InfoOutlined'
-import LightModeOutlined from '@mui/icons-material/LightModeOutlined'
-import Refresh from '@mui/icons-material/Refresh'
-import { Alert, AppBar, Box, Button, Card, CardContent, Chip, CircularProgress, Collapse, Container, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, IconButton, InputLabel, Menu, MenuItem, Paper, Select, Stack, Tab, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs, ToggleButton, ToggleButtonGroup, Toolbar, Tooltip, Typography, TextField } from '@mui/material'
+import {
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
+import DarkModeOutlined from "@mui/icons-material/DarkModeOutlined";
+import ExpandMore from "@mui/icons-material/ExpandMore";
+import FileDownloadOutlined from "@mui/icons-material/FileDownloadOutlined";
+import InfoOutlined from "@mui/icons-material/InfoOutlined";
+import LightModeOutlined from "@mui/icons-material/LightModeOutlined";
+import Refresh from "@mui/icons-material/Refresh";
+import type { Dayjs } from "dayjs";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import {
+  Alert,
+  AppBar,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Collapse,
+  Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  IconButton,
+  InputLabel,
+  Menu,
+  MenuItem,
+  Paper,
+  Select,
+  Stack,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tabs,
+  ToggleButton,
+  ToggleButtonGroup,
+  Toolbar,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 
-type Currency='SGD'|'USD'
-type Broker='tiger'|'moomoo'
-type Summary={empty:boolean;supportsContributions:boolean;totalEquity?:string;netContributions?:string;overallPnl?:string;overallReturnPct?:string|null;cash?:string;holdingsValue?:string;unrealizedPnl?:string;reconciliationDifference?:string}
-type Position={symbol:string;name:string;market:string;quantity:string;average_cost:string;market_price:string;market_value:string;unrealized_pnl:string;asset_type:string}
-type Funding={transaction_id:string;type_label:string;amount:string;business_date:string;completed:number;original_currency:string;display_currency:string;direction:string;settlement_date:string|null;remark:string}
-type Point={captured_at:string;total_equity:string;net_contributions:string;performance_value:string;funding_event:boolean}
-type Status={lastSuccess:string|null;lastError:string|null;stale:boolean;components:Record<string,string>;cashFlowLastSuccess:string|null}
+type Currency = "SGD" | "USD";
+type Broker = "tiger" | "moomoo";
+type Summary = {
+  empty: boolean;
+  supportsContributions: boolean;
+  totalEquity?: string;
+  netContributions?: string;
+  overallPnl?: string;
+  overallReturnPct?: string | null;
+  cash?: string;
+  holdingsValue?: string;
+  unrealizedPnl?: string;
+  reconciliationDifference?: string;
+};
+type Position = {
+  symbol: string;
+  name: string;
+  market: string;
+  quantity: string;
+  average_cost: string;
+  market_price: string;
+  market_value: string;
+  unrealized_pnl: string;
+  asset_type: string;
+};
+type Funding = {
+  transaction_id: string;
+  type_label: string;
+  amount: string;
+  business_date: string;
+  completed: number;
+  original_currency: string;
+  display_currency: string;
+  direction: string;
+  settlement_date: string | null;
+  remark: string;
+};
+type Point = {
+  captured_at: string;
+  total_equity: string;
+  net_contributions: string;
+  performance_value: string;
+  funding_event: boolean;
+};
+type Status = {
+  lastSuccess: string | null;
+  lastError: string | null;
+  stale: boolean;
+  components: Record<string, string>;
+  cashFlowLastSuccess: string | null;
+};
 
-const api=async<T,>(path:string,options?:RequestInit):Promise<T>=>{const response=await fetch(path,options);if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||`Request failed (${response.status})`)}return response.json()}
-const money=(value:string|undefined,currency:string)=>value==null?'—':new Intl.NumberFormat('en-SG',{style:'currency',currency,maximumFractionDigits:2}).format(Number(value))
+const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed (${response.status})`);
+  }
+  return response.json();
+};
+const money = (value: string | undefined, currency: string) =>
+  value == null
+    ? "—"
+    : new Intl.NumberFormat("en-SG", {
+        style: "currency",
+        currency,
+        maximumFractionDigits: 2,
+      }).format(Number(value));
 
-function LineChart({data,currency,metric}:{data:Point[];currency:Currency;metric:'total_equity'|'performance_value'}){
-  const [active,setActive]=useState<number|null>(null)
-  if(!data.length)return <Box sx={{height:220,display:'grid',placeItems:'center',color:'text.secondary'}}>History will appear after a refresh.</Box>
-  const width=800,height=270,left=64,right=18,top=20,bottom=38,plotWidth=width-left-right,plotHeight=height-top-bottom
-  const values=data.map(p=>Number(p[metric])),rawMin=Math.min(...values),rawMax=Math.max(...values),padding=(rawMax-rawMin||Math.max(Math.abs(rawMax)*.05,1))*.12,min=rawMin-padding,max=rawMax+padding,range=max-min
-  const coords=values.map((value,index)=>({x:left+(index/(values.length-1||1))*plotWidth,y:top+(1-(value-min)/range)*plotHeight}))
-  const points=coords.map(p=>`${p.x},${p.y}`).join(' '),latest=coords.at(-1)!,trendUp=values.at(-1)!>=values[0]
-  const compact=(value:number)=>new Intl.NumberFormat('en-SG',{notation:'compact',maximumFractionDigits:1}).format(value)
-  const date=(value:string)=>new Date(value).toLocaleDateString(undefined,{day:'numeric',month:'short',year:'2-digit'})
-  const inspect=(event:ReactPointerEvent<SVGSVGElement>)=>{const rect=event.currentTarget.getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width*width;setActive(Math.max(0,Math.min(data.length-1,Math.round((x-left)/plotWidth*(data.length-1||1)))))}
-  const selected=active==null?null:{...coords[active],...data[active]}
-  const tooltipX=selected?(selected.x>width-190?selected.x-158:selected.x+12):0,tooltipY=selected?Math.max(8,selected.y-66):0
-  return <Box component="svg" role="img" aria-label="Portfolio equity history" viewBox={`0 0 ${width} ${height}`} onPointerMove={inspect} onPointerLeave={()=>setActive(null)} sx={{width:'100%',height:'auto',minHeight:230,color:trendUp?'success.main':'error.main',touchAction:'pan-y'}}>
-    <title>{metric==='total_equity'?'Portfolio equity history':'Contribution-adjusted performance history'}</title><desc>{`Value moved from ${money(String(values[0]),currency)} to ${money(String(values.at(-1)),currency)} across ${data.length} recorded points.`}</desc>
-    <defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="currentColor" stopOpacity=".24"/><stop offset="1" stopColor="currentColor" stopOpacity=".015"/></linearGradient></defs>
-    {[0,.25,.5,.75,1].map(f=>{const y=top+f*plotHeight,value=max-f*range;return <g key={f}><line x1={left} x2={width-right} y1={y} y2={y} stroke="currentColor" opacity=".1" strokeDasharray="4 5"/><text x={left-10} y={y+4} textAnchor="end" fill="currentColor" opacity=".65" fontSize="11">{compact(value)}</text></g>})}
-    <polygon points={`${left},${height-bottom} ${points} ${latest.x},${height-bottom}`} fill="url(#fill)"/><polyline points={points} fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
-    {data.map((point,i)=>point.funding_event?<rect key={`fund-${i}`} x={coords[i].x-3.5} y={coords[i].y-3.5} width="7" height="7" rx="1" fill="#ed6c02" stroke="white" strokeWidth="1.5"/>:null)}
-    {[0,Math.floor((data.length-1)/2),data.length-1].filter((v,i,a)=>a.indexOf(v)===i).map(i=><text key={i} x={coords[i].x} y={height-10} textAnchor={i===0?'start':i===data.length-1?'end':'middle'} fill="currentColor" opacity=".65" fontSize="11">{date(data[i].captured_at)}</text>)}
-    <circle cx={latest.x} cy={latest.y} r="5" fill="currentColor" stroke="white" strokeWidth="3"/>
-    {selected&&<g pointerEvents="none"><line x1={selected.x} x2={selected.x} y1={top} y2={height-bottom} stroke="currentColor" opacity=".3" strokeDasharray="3 4"/><circle cx={selected.x} cy={selected.y} r="6" fill="currentColor" stroke="white" strokeWidth="2"/><rect x={tooltipX} y={tooltipY} width="146" height="52" rx="10" fill="currentColor"/><text x={tooltipX+12} y={tooltipY+20} fill="white" fontSize="11" opacity=".85">{date(selected.captured_at)}</text><text x={tooltipX+12} y={tooltipY+40} fill="white" fontSize="15" fontWeight="700">{money(selected[metric],currency)}</text></g>}
-  </Box>
+function LineChart({
+  data,
+  currency,
+  metric,
+}: {
+  data: Point[];
+  currency: Currency;
+  metric: "total_equity" | "performance_value";
+}) {
+  const [active, setActive] = useState<number | null>(null);
+  if (!data.length)
+    return (
+      <Box
+        sx={{
+          height: 220,
+          display: "grid",
+          placeItems: "center",
+          color: "text.secondary",
+        }}
+      >
+        History will appear after a refresh.
+      </Box>
+    );
+  const width = 800,
+    height = 270,
+    left = 64,
+    right = 18,
+    top = 20,
+    bottom = 38,
+    plotWidth = width - left - right,
+    plotHeight = height - top - bottom;
+  const values = data.map((p) => Number(p[metric])),
+    rawMin = Math.min(...values),
+    rawMax = Math.max(...values),
+    padding = (rawMax - rawMin || Math.max(Math.abs(rawMax) * 0.05, 1)) * 0.12,
+    min = rawMin - padding,
+    max = rawMax + padding,
+    range = max - min;
+  const coords = values.map((value, index) => ({
+    x: left + (index / (values.length - 1 || 1)) * plotWidth,
+    y: top + (1 - (value - min) / range) * plotHeight,
+  }));
+  const points = coords.map((p) => `${p.x},${p.y}`).join(" "),
+    latest = coords.at(-1)!,
+    trendUp = values.at(-1)! >= values[0];
+  const compact = (value: number) =>
+    new Intl.NumberFormat("en-SG", {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
+  const date = (value: string) =>
+    new Date(value).toLocaleDateString(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "2-digit",
+    });
+  const inspect = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect(),
+      x = ((event.clientX - rect.left) / rect.width) * width;
+    setActive(
+      Math.max(
+        0,
+        Math.min(
+          data.length - 1,
+          Math.round(((x - left) / plotWidth) * (data.length - 1 || 1)),
+        ),
+      ),
+    );
+  };
+  const selected =
+    active == null ? null : { ...coords[active], ...data[active] };
+  const tooltipX = selected
+      ? selected.x > width - 190
+        ? selected.x - 158
+        : selected.x + 12
+      : 0,
+    tooltipY = selected ? Math.max(8, selected.y - 66) : 0;
+  return (
+    <Box
+      component="svg"
+      role="img"
+      aria-label="Portfolio equity history"
+      viewBox={`0 0 ${width} ${height}`}
+      onPointerMove={inspect}
+      onPointerLeave={() => setActive(null)}
+      sx={{
+        width: "100%",
+        height: "auto",
+        minHeight: 230,
+        color: trendUp ? "success.main" : "error.main",
+        touchAction: "pan-y",
+      }}
+    >
+      <title>
+        {metric === "total_equity"
+          ? "Portfolio equity history"
+          : "Contribution-adjusted performance history"}
+      </title>
+      <desc>{`Value moved from ${money(String(values[0]), currency)} to ${money(String(values.at(-1)), currency)} across ${data.length} recorded points.`}</desc>
+      <defs>
+        <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="currentColor" stopOpacity=".24" />
+          <stop offset="1" stopColor="currentColor" stopOpacity=".015" />
+        </linearGradient>
+      </defs>
+      {[0, 0.25, 0.5, 0.75, 1].map((f) => {
+        const y = top + f * plotHeight,
+          value = max - f * range;
+        return (
+          <g key={f}>
+            <line
+              x1={left}
+              x2={width - right}
+              y1={y}
+              y2={y}
+              stroke="currentColor"
+              opacity=".1"
+              strokeDasharray="4 5"
+            />
+            <text
+              x={left - 10}
+              y={y + 4}
+              textAnchor="end"
+              fill="currentColor"
+              opacity=".65"
+              fontSize="11"
+            >
+              {compact(value)}
+            </text>
+          </g>
+        );
+      })}
+      <polygon
+        points={`${left},${height - bottom} ${points} ${latest.x},${height - bottom}`}
+        fill="url(#fill)"
+      />
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {data.map((point, i) =>
+        point.funding_event ? (
+          <rect
+            key={`fund-${i}`}
+            x={coords[i].x - 3.5}
+            y={coords[i].y - 3.5}
+            width="7"
+            height="7"
+            rx="1"
+            fill="#ed6c02"
+            stroke="white"
+            strokeWidth="1.5"
+          />
+        ) : null,
+      )}
+      {[0, Math.floor((data.length - 1) / 2), data.length - 1]
+        .filter((v, i, a) => a.indexOf(v) === i)
+        .map((i) => (
+          <text
+            key={i}
+            x={coords[i].x}
+            y={height - 10}
+            textAnchor={
+              i === 0 ? "start" : i === data.length - 1 ? "end" : "middle"
+            }
+            fill="currentColor"
+            opacity=".65"
+            fontSize="11"
+          >
+            {date(data[i].captured_at)}
+          </text>
+        ))}
+      <circle
+        cx={latest.x}
+        cy={latest.y}
+        r="5"
+        fill="currentColor"
+        stroke="white"
+        strokeWidth="3"
+      />
+      {selected && (
+        <g pointerEvents="none">
+          <line
+            x1={selected.x}
+            x2={selected.x}
+            y1={top}
+            y2={height - bottom}
+            stroke="currentColor"
+            opacity=".3"
+            strokeDasharray="3 4"
+          />
+          <circle
+            cx={selected.x}
+            cy={selected.y}
+            r="6"
+            fill="currentColor"
+            stroke="white"
+            strokeWidth="2"
+          />
+          <rect
+            x={tooltipX}
+            y={tooltipY}
+            width="146"
+            height="52"
+            rx="10"
+            fill="currentColor"
+          />
+          <text
+            x={tooltipX + 12}
+            y={tooltipY + 20}
+            fill="white"
+            fontSize="11"
+            opacity=".85"
+          >
+            {date(selected.captured_at)}
+          </text>
+          <text
+            x={tooltipX + 12}
+            y={tooltipY + 40}
+            fill="white"
+            fontSize="15"
+            fontWeight="700"
+          >
+            {money(selected[metric], currency)}
+          </text>
+        </g>
+      )}
+    </Box>
+  );
 }
 
-function Section({title,subtitle,children,initial=true}:{title:string;subtitle?:string;children:ReactNode;initial?:boolean}){
-  const [open,setOpen]=useState(initial)
-  return <Paper variant="outlined" sx={{overflow:'hidden',borderColor:'divider',boxShadow:'0 8px 30px rgba(0,0,0,.035)'}}><Button fullWidth onClick={()=>setOpen(!open)} aria-expanded={open} sx={{p:{xs:2,md:2.5},justifyContent:'flex-start',color:'text.primary',borderRadius:0}}><Box sx={{flexGrow:1,textAlign:'left'}}><Typography variant="h5">{title}</Typography>{subtitle&&<Typography variant="body2" color="text.secondary">{subtitle}</Typography>}</Box><ExpandMore sx={{transform:open?'rotate(180deg)':'none',transition:'transform .2s'}}/></Button><Collapse in={open}><Box sx={{borderTop:1,borderColor:'divider'}}>{children}</Box></Collapse></Paper>
+function Section({
+  title,
+  subtitle,
+  children,
+  initial = true,
+}: {
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  initial?: boolean;
+}) {
+  const [open, setOpen] = useState(initial);
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        overflow: "hidden",
+        borderColor: "divider",
+        boxShadow: "0 8px 30px rgba(0,0,0,.035)",
+      }}
+    >
+      <Button
+        fullWidth
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        sx={{
+          p: { xs: 2, md: 2.5 },
+          justifyContent: "flex-start",
+          color: "text.primary",
+          borderRadius: 0,
+        }}
+      >
+        <Box sx={{ flexGrow: 1, textAlign: "left" }}>
+          <Typography variant="h5">{title}</Typography>
+          {subtitle && (
+            <Typography variant="body2" color="text.secondary">
+              {subtitle}
+            </Typography>
+          )}
+        </Box>
+        <ExpandMore
+          sx={{
+            transform: open ? "rotate(180deg)" : "none",
+            transition: "transform .2s",
+          }}
+        />
+      </Button>
+      <Collapse in={open}>
+        <Box sx={{ borderTop: 1, borderColor: "divider" }}>{children}</Box>
+      </Collapse>
+    </Paper>
+  );
 }
 
-function HoldingsTable({rows,currency,empty,total}:{rows:Position[];currency:Currency;empty:string;total:number}){
-  const signed=(value:string)=>`${Number(value)>=0?'+':''}${money(value,currency)}`
-  return <TableContainer><Table size="small"><TableHead><TableRow>{['Holding','Market','Quantity','Avg cost','Price','Market value','Allocation','Unrealized P&L'].map(x=><TableCell key={x} align={x==='Holding'?'left':'right'} sx={{color:'text.secondary',fontWeight:650}}>{x}</TableCell>)}</TableRow></TableHead><TableBody>{rows.length?rows.map(p=>{const gain=Number(p.unrealized_pnl)>=0;return <TableRow key={`${p.asset_type}-${p.market}-${p.symbol}`} hover><TableCell><Typography fontWeight={700}>{p.symbol}</Typography><Typography variant="caption" color="text.secondary">{p.name}</Typography></TableCell><TableCell align="right">{p.market}</TableCell><TableCell align="right">{p.quantity}</TableCell><TableCell align="right">{money(p.average_cost,currency)}</TableCell><TableCell align="right">{money(p.market_price,currency)}</TableCell><TableCell align="right" sx={{fontWeight:650}}>{money(p.market_value,currency)}</TableCell><TableCell align="right">{total?`${(Number(p.market_value)/total*100).toFixed(1)}%`:'—'}</TableCell><TableCell align="right" sx={{fontWeight:750,color:gain?'success.main':'error.main'}}>{signed(p.unrealized_pnl)}</TableCell></TableRow>}):<TableRow><TableCell colSpan={8} align="center" sx={{py:5,color:'text.secondary'}}>{empty}</TableCell></TableRow>}</TableBody></Table></TableContainer>
+function HoldingsTable({
+  rows,
+  currency,
+  empty,
+  total,
+}: {
+  rows: Position[];
+  currency: Currency;
+  empty: string;
+  total: number;
+}) {
+  const signed = (value: string) =>
+    `${Number(value) >= 0 ? "+" : ""}${money(value, currency)}`;
+  return (
+    <TableContainer>
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            {[
+              "Holding",
+              "Market",
+              "Quantity",
+              "Avg cost",
+              "Price",
+              "Market value",
+              "Allocation",
+              "Unrealized P&L",
+            ].map((x) => (
+              <TableCell
+                key={x}
+                align={x === "Holding" ? "left" : "right"}
+                sx={{ color: "text.secondary", fontWeight: 650 }}
+              >
+                {x}
+              </TableCell>
+            ))}
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {rows.length ? (
+            rows.map((p) => {
+              const gain = Number(p.unrealized_pnl) >= 0;
+              return (
+                <TableRow key={`${p.asset_type}-${p.market}-${p.symbol}`} hover>
+                  <TableCell>
+                    <Typography fontWeight={700}>{p.symbol}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {p.name}
+                    </Typography>
+                  </TableCell>
+                  <TableCell align="right">{p.market}</TableCell>
+                  <TableCell align="right">{p.quantity}</TableCell>
+                  <TableCell align="right">
+                    {money(p.average_cost, currency)}
+                  </TableCell>
+                  <TableCell align="right">
+                    {money(p.market_price, currency)}
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 650 }}>
+                    {money(p.market_value, currency)}
+                  </TableCell>
+                  <TableCell align="right">
+                    {total
+                      ? `${((Number(p.market_value) / total) * 100).toFixed(1)}%`
+                      : "—"}
+                  </TableCell>
+                  <TableCell
+                    align="right"
+                    sx={{
+                      fontWeight: 750,
+                      color: gain ? "success.main" : "error.main",
+                    }}
+                  >
+                    {signed(p.unrealized_pnl)}
+                  </TableCell>
+                </TableRow>
+              );
+            })
+          ) : (
+            <TableRow>
+              <TableCell
+                colSpan={8}
+                align="center"
+                sx={{ py: 5, color: "text.secondary" }}
+              >
+                {empty}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
 }
 
-export default function App({dark,onToggleTheme}:{dark:boolean;onToggleTheme:()=>void}){
-  const [broker,setBroker]=useState<Broker>(()=>localStorage.getItem('broker')==='moomoo'?'moomoo':'tiger')
-  const [currency,setCurrency]=useState<Currency>(()=>localStorage.getItem('reportingCurrency')==='USD'?'USD':'SGD')
-  const [summary,setSummary]=useState<Summary|null>(null),[positions,setPositions]=useState<Position[]>([]),[funding,setFunding]=useState<Funding[]>([]),[history,setHistory]=useState<Point[]>([]),[status,setStatus]=useState<Status|null>(null)
-  const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[error,setError]=useState(''),[staleDismissed,setStaleDismissed]=useState(false),[reconciliationDismissed,setReconciliationDismissed]=useState(false)
-  const [exportAnchor,setExportAnchor]=useState<HTMLElement|null>(null)
-  const [cashFlowOpen,setCashFlowOpen]=useState(false),[cashFlowDate,setCashFlowDate]=useState(""),[cashFlowDates,setCashFlowDates]=useState<string[]>([]),[cashFlowLoading,setCashFlowLoading]=useState(false),[notice,setNotice]=useState("")
-  const [chartMetric,setChartMetric]=useState<'total_equity'|'performance_value'>('performance_value'),[range,setRange]=useState<'1M'|'3M'|'1Y'|'ALL'>('1Y')
-  const load=useCallback(async()=>{setLoading(true);try{const q=`?currency=${currency}&broker=${broker}`,b=`?broker=${broker}`;const[s,p,f,h,st]=await Promise.all([api<Summary>(`/api/summary${q}`),api<Position[]>(`/api/positions${q}`),api<Funding[]>(`/api/funding${q}`),api<Point[]>(`/api/history${q}`),api<Status>(`/api/sync/status${b}`)]);setSummary(s);setPositions(p);setFunding(f);setHistory(h);setStatus(st);setError('')}catch(e){setError(e instanceof Error?e.message:'Could not load portfolio')}finally{setLoading(false)}},[broker,currency])
-  useEffect(()=>{load()},[load]);useEffect(()=>{localStorage.setItem('reportingCurrency',currency)},[currency]);useEffect(()=>{localStorage.setItem('broker',broker)},[broker])
-  const refresh=async()=>{setRefreshing(true);setError('');try{await api(`/api/sync?broker=${broker}`,{method:'POST'});setStaleDismissed(false);setReconciliationDismissed(false);await load()}catch(e){setError(e instanceof Error?e.message:'Refresh failed')}finally{setRefreshing(false)}}
-  const today=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10)
-  const addCashFlowDate=()=>{if(!cashFlowDate)return;if(cashFlowDate>today){setError("Cash-flow dates cannot be in the future");return}if(cashFlowDates.includes(cashFlowDate)){setError("That cash-flow date is already selected");return}if(cashFlowDates.length>=20){setError("Select no more than 20 cash-flow dates");return}setCashFlowDates([...cashFlowDates,cashFlowDate].sort());setCashFlowDate("");setError("")}
-  const fetchCashFlow=async()=>{setCashFlowLoading(true);setError("");try{const result=await api<{rawCount:number;verifiedCount:number}>("/api/cash-flow/sync?broker=moomoo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({dates:cashFlowDates})});setNotice("Fetched "+result.rawCount+" record"+(result.rawCount===1?"":"s")+"; "+result.verifiedCount+" verified transfer"+(result.verifiedCount===1?"":"s")+" shown.");setCashFlowDates([]);setCashFlowOpen(false);await load()}catch(e){setError(e instanceof Error?e.message:"Cash-flow sync failed")}finally{setCashFlowLoading(false)}}
-  if(loading)return <Box sx={{height:'100vh',display:'grid',placeItems:'center'}}><CircularProgress aria-label="Loading portfolio"/></Box>
-  const signed=(value?:string)=>`${Number(value||0)>=0?'+':''}${money(value,currency)}`,pnl=Number(summary?.overallPnl||0)
-  const cards=summary?.supportsContributions?[
-    {label:'Total equity',value:money(summary?.totalEquity,currency)},
-    {label:'Net contributions',value:money(summary?.netContributions,currency),info:broker==='tiger'?'Completed deposits − withdrawals − withdrawal fees + applicable refunds.':'Verified SGD DDI deposits − bank withdrawals. All other cash flows are excluded.'},
-    {label:'Overall P&L',value:signed(summary?.overallPnl),tone:pnl,info:'Total account equity − net contributions.'},
-    {label:'Simple overall return',value:summary?.overallReturnPct==null?'—':`${Number(summary.overallReturnPct)>=0?'+':''}${Number(summary.overallReturnPct).toFixed(2)}%`,tone:pnl,info:'Overall P&L ÷ net contributions × 100. This is not a time-weighted return or XIRR.'},
-    {label:'Cash',value:money(summary?.cash,currency)},
-    {label:'Holdings value',value:money(summary?.holdingsValue,currency)}]:[
-    {label:'Total equity',value:money(summary?.totalEquity,currency)},
-    {label:'Cash',value:money(summary?.cash,currency)},
-    {label:'Holdings value',value:money(summary?.holdingsValue,currency)},
-    {label:'Unrealized P&L',value:signed(summary?.unrealizedPnl),tone:Number(summary?.unrealizedPnl||0),info:'Sum of unrealized P&L returned for listed Moomoo positions.'}]
-  const stocks=positions.filter(p=>p.asset_type!=='FUND'),funds=positions.filter(p=>p.asset_type==='FUND')
-  const holdingsTotal=Number(summary?.holdingsValue||0),lastPoint=history.length?new Date(history.at(-1)!.captured_at).getTime():0,days={"1M":31,"3M":93,"1Y":366,"ALL":Infinity}[range]
-  const chartData=range==='ALL'?history:history.filter(point=>new Date(point.captured_at).getTime()>=lastPoint-days*86400000)
-  const exportCsv=(dataset:string)=>{setExportAnchor(null);window.location.assign(`/api/export/${dataset}?currency=${currency}&broker=${broker}`)}
-  const chartMetricShown=summary?.supportsContributions?chartMetric:'total_equity'
-  return <Box sx={{minHeight:'100vh',background:dark?'radial-gradient(circle at 50% -20%,#282017 0,transparent 38%)':'radial-gradient(circle at 50% -20%,#fff4e7 0,transparent 42%)'}}><AppBar position="sticky" color="transparent" elevation={0} sx={{backdropFilter:'blur(20px)',backgroundColor:dark?'rgba(11,12,14,.78)':'rgba(255,255,255,.78)',borderBottom:1,borderColor:'divider'}}><Toolbar sx={{gap:1.25,maxWidth:1536,width:'100%',mx:'auto'}}><Typography variant="h6" sx={{fontWeight:800,letterSpacing:'-.03em'}}>Portfolio Tracker</Typography><Tabs value={broker} onChange={(_,value)=>setBroker(value)} sx={{flexGrow:1,minHeight:48}}><Tab value="tiger" label="Tiger"/><Tab value="moomoo" label="Moomoo"/></Tabs><FormControl size="small"><InputLabel id="currency-label">Currency</InputLabel><Select labelId="currency-label" value={currency} label="Currency" onChange={e=>setCurrency(e.target.value as Currency)}><MenuItem value="SGD">SGD</MenuItem><MenuItem value="USD">USD</MenuItem></Select></FormControl><Tooltip title={dark?'Use light mode':'Use dark mode'}><IconButton onClick={onToggleTheme} aria-label={dark?'Use light mode':'Use dark mode'}>{dark?<LightModeOutlined/>:<DarkModeOutlined/>}</IconButton></Tooltip><Chip size="small" label="Live" color="success" variant="outlined"/><Button variant="outlined" startIcon={<FileDownloadOutlined/>} onClick={event=>setExportAnchor(event.currentTarget)}>Export</Button><Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={()=>setExportAnchor(null)}><MenuItem onClick={()=>exportCsv('positions')}>Positions CSV</MenuItem><MenuItem onClick={()=>exportCsv('funding')}>{broker==='tiger'?'Funding':'Deposits & withdrawals'} CSV</MenuItem><MenuItem onClick={()=>exportCsv('history')}>Portfolio history CSV</MenuItem></Menu><Button variant="contained" startIcon={refreshing?<CircularProgress size={16} color="inherit"/>:<Refresh/>} onClick={refresh} disabled={refreshing}>Refresh</Button></Toolbar></AppBar>
-    <Container maxWidth="xl" sx={{py:{xs:3,md:6}}}><Stack spacing={3}>
-      {error&&<Alert severity="error" onClose={()=>setError('')}>{error}{status?.lastSuccess&&' Previously synced data remains available.'}</Alert>}{notice&&<Alert severity="success" onClose={()=>setNotice("")}>{notice}</Alert>}{status?.stale&&status.lastSuccess&&!staleDismissed&&<Alert severity="warning" onClose={()=>setStaleDismissed(true)}>Portfolio data may be stale. Refresh for current values.</Alert>}{Math.abs(Number(summary?.reconciliationDifference||0))>1&&!reconciliationDismissed&&<Alert severity="warning" onClose={()=>setReconciliationDismissed(true)}>Account reconciliation differs by {money(summary?.reconciliationDifference,currency)}. Cash plus listed positions does not match total equity; check Sync health and refresh.</Alert>}{summary?.empty&&<Alert severity="info" action={<Button onClick={refresh}>Sync now</Button>}>No portfolio data yet.</Alert>}
-      <Box><Typography variant="h4">Your {broker==='tiger'?'Tiger':'Moomoo'} portfolio</Typography><Typography color="text.secondary" sx={{mt:.5}}>Reporting in {currency} · Last {broker==='tiger'?'Tiger':'Moomoo'} sync {status?.lastSuccess?new Date(status.lastSuccess).toLocaleString():'never'}</Typography></Box>
-      <Box sx={{display:'grid',gridTemplateColumns:{xs:'1fr 1fr',md:'repeat(3,1fr)',lg:'repeat(6,1fr)'},gap:2}}>{cards.map(card=><Card key={card.label} variant="outlined" sx={{borderColor:'divider',boxShadow:'0 10px 35px rgba(0,0,0,.04)',transition:'transform .2s, box-shadow .2s','&:hover':{transform:'translateY(-2px)',boxShadow:'0 14px 40px rgba(0,0,0,.08)'}}}><CardContent sx={{p:2.5}}><Box sx={{display:'flex',alignItems:'center'}}><Typography variant="body2" color="text.secondary" sx={{flexGrow:1}}>{card.label}</Typography>{card.info&&<Tooltip title={card.info} arrow><IconButton size="small" aria-label={`How ${card.label.toLowerCase()} is calculated`}><InfoOutlined sx={{fontSize:17}}/></IconButton></Tooltip>}</Box><Typography variant="h6" sx={{fontWeight:760,mt:1,color:card.tone==null?'text.primary':card.tone>=0?'success.main':'error.main'}}>{card.value}</Typography></CardContent></Card>)}</Box>
-      <Section title="Portfolio progress" subtitle={chartMetricShown==='performance_value'?'Equity adjusted for deposits and withdrawals':'Raw account equity over time'}><Box sx={{p:{xs:2,md:3}}}><Stack direction={{xs:'column',sm:'row'}} justifyContent="space-between" spacing={1.5} sx={{mb:2}}>{summary?.supportsContributions?<ToggleButtonGroup size="small" exclusive value={chartMetric} onChange={(_,value)=>value&&setChartMetric(value)}><ToggleButton value="performance_value">Performance</ToggleButton><ToggleButton value="total_equity">Equity</ToggleButton></ToggleButtonGroup>:<Typography variant="body2" color="text.secondary">History starts with the first successful Moomoo sync.</Typography>}<ToggleButtonGroup size="small" exclusive value={range} onChange={(_,value)=>value&&setRange(value)}>{(['1M','3M','1Y','ALL'] as const).map(value=><ToggleButton value={value} key={value}>{value==='ALL'?'All':value}</ToggleButton>)}</ToggleButtonGroup></Stack><LineChart data={chartData} currency={currency} metric={chartMetricShown}/>{summary?.supportsContributions&&<Stack direction="row" alignItems="center" spacing={1} sx={{mt:1,color:'text.secondary'}}><Box sx={{width:8,height:8,borderRadius:.5,bgcolor:'primary.main'}}/><Typography variant="caption">Funding activity</Typography></Stack>}</Box></Section>
-      <Section title="Stocks & ETFs" subtitle={`${stocks.length} current holding${stocks.length===1?'':'s'}`}><HoldingsTable rows={stocks} currency={currency} total={holdingsTotal} empty="No stock or ETF holdings"/></Section>
-      <Section title="Money market & funds" subtitle={`${funds.length} current fund holding${funds.length===1?'':'s'}`}><HoldingsTable rows={funds} currency={currency} total={holdingsTotal} empty="No money-market or fund holdings"/></Section>
-      <Section title={broker==='tiger'?'Funding history':'Deposits & withdrawals'} subtitle={`${funding.length} verified transaction${funding.length===1?'':'s'}`} initial={false}><>{broker==="moomoo"&&<Box sx={{p:2,borderBottom:1,borderColor:"divider",display:"flex",alignItems:"center",gap:2,flexWrap:"wrap"}}><Button variant="outlined" onClick={()=>setCashFlowOpen(true)}>Fetch cash flow</Button><Typography variant="body2" color="text.secondary">{"Last cash-flow sync: "+(status?.cashFlowLastSuccess?new Date(status.cashFlowLastSuccess).toLocaleString():"never")}</Typography></Box>}<TableContainer><Table size="small"><TableHead><TableRow>{(broker==='tiger'?['Date','Type','Transaction ID','Status','Amount']:['Date','Type','Direction','Reference','Amount']).map((x,i,a)=><TableCell key={x} align={i===a.length-1?'right':'left'} sx={{color:'text.secondary',fontWeight:650}}>{x}</TableCell>)}</TableRow></TableHead><TableBody>{funding.length?funding.map(f=><TableRow key={f.transaction_id} hover><TableCell>{new Date(`${f.business_date}T00:00:00`).toLocaleDateString()}</TableCell><TableCell sx={{fontWeight:650}}>{f.type_label}</TableCell>{broker==='tiger'?<><TableCell>{f.transaction_id}</TableCell><TableCell><Chip size="small" label={f.completed?'Completed':'Pending'} color={f.completed?'success':'default'} variant="outlined"/></TableCell></>:<><TableCell>{f.direction||'—'}</TableCell><TableCell sx={{maxWidth:420,whiteSpace:'normal'}}>{f.remark||'—'}</TableCell></>}<TableCell align="right" sx={{fontWeight:650}}>{money(f.amount,f.display_currency)}{broker==='tiger'&&currency!==f.original_currency&&<Typography variant="caption" display="block" color="text.secondary">Originally {f.original_currency}</Typography>}</TableCell></TableRow>):<TableRow><TableCell colSpan={5} align="center" sx={{py:5}}>No verified {broker==='tiger'?'funding transactions':'deposits or withdrawals'}</TableCell></TableRow>}</TableBody></Table></TableContainer></></Section>
-      <Section title="Sync health" subtitle={`Latest ${broker==='tiger'?'Tiger':'Moomoo'} data-source status`} initial={false}><Box sx={{p:{xs:2,md:3},display:'flex',gap:1.25,flexWrap:'wrap'}}>{Object.entries(status?.components||{}).map(([name,value])=><Chip key={name} label={`${name.replaceAll('_',' ')}: ${value}`} color={value==='ok'?'success':value.includes('fallback')?'warning':'default'} variant="outlined"/>)}{broker==='moomoo'&&status?.cashFlowLastSuccess&&<Chip label={`cash flow last synced: ${new Date(status.cashFlowLastSuccess).toLocaleString()}`} color="success" variant="outlined"/>}{!Object.keys(status?.components||{}).length&&<Typography color="text.secondary">Run a fresh sync to record component health.</Typography>}</Box></Section>
-    </Stack></Container><Dialog open={cashFlowOpen} onClose={()=>!cashFlowLoading&&setCashFlowOpen(false)} fullWidth maxWidth="sm"><DialogTitle>Fetch Moomoo cash flow</DialogTitle><DialogContent><Typography color="text.secondary" sx={{mb:2}}>Add up to 20 known deposit or withdrawal dates. Moomoo is queried once per date.</Typography><Stack direction={{xs:"column",sm:"row"}} spacing={1}><TextField type="date" label="Cash-flow date" value={cashFlowDate} onChange={event=>setCashFlowDate(event.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:today}} fullWidth/><Button onClick={addCashFlowDate} disabled={!cashFlowDate||cashFlowDates.length>=20}>Add</Button></Stack><Box sx={{display:"flex",gap:1,flexWrap:"wrap",mt:2}}>{cashFlowDates.map(value=><Chip key={value} label={new Date(value+"T00:00:00").toLocaleDateString()} onDelete={()=>setCashFlowDates(cashFlowDates.filter(item=>item!==value))} disabled={cashFlowLoading}/>)}</Box><Typography variant="caption" color="text.secondary" display="block" sx={{mt:2}}>{cashFlowDates.length}/20 dates selected</Typography></DialogContent><DialogActions><Button onClick={()=>setCashFlowOpen(false)} disabled={cashFlowLoading}>Cancel</Button><Button variant="contained" onClick={fetchCashFlow} disabled={!cashFlowDates.length||cashFlowLoading}>{cashFlowLoading?<CircularProgress size={18} color="inherit"/>:"Fetch cash flow"}</Button></DialogActions></Dialog></Box>
+export default function App({
+  dark,
+  onToggleTheme,
+}: {
+  dark: boolean;
+  onToggleTheme: () => void;
+}) {
+  const [broker, setBroker] = useState<Broker>(() =>
+    localStorage.getItem("broker") === "moomoo" ? "moomoo" : "tiger",
+  );
+  const [currency, setCurrency] = useState<Currency>(() =>
+    localStorage.getItem("reportingCurrency") === "USD" ? "USD" : "SGD",
+  );
+  const [summary, setSummary] = useState<Summary | null>(null),
+    [positions, setPositions] = useState<Position[]>([]),
+    [funding, setFunding] = useState<Funding[]>([]),
+    [history, setHistory] = useState<Point[]>([]),
+    [status, setStatus] = useState<Status | null>(null);
+  const [loading, setLoading] = useState(true),
+    [refreshing, setRefreshing] = useState(false),
+    [error, setError] = useState(""),
+    [staleDismissed, setStaleDismissed] = useState(false),
+    [reconciliationDismissed, setReconciliationDismissed] = useState(false);
+  const [exportAnchor, setExportAnchor] = useState<HTMLElement | null>(null);
+  const [cashFlowOpen, setCashFlowOpen] = useState(false),
+    [cashFlowDate, setCashFlowDate] = useState<Dayjs | null>(null),
+    [cashFlowDates, setCashFlowDates] = useState<string[]>([]),
+    [cashFlowLoading, setCashFlowLoading] = useState(false),
+    [notice, setNotice] = useState("");
+  const [chartMetric, setChartMetric] = useState<
+      "total_equity" | "performance_value"
+    >("performance_value"),
+    [range, setRange] = useState<"1M" | "3M" | "1Y" | "ALL">("1Y");
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const q = `?currency=${currency}&broker=${broker}`,
+        b = `?broker=${broker}`;
+      const [s, p, f, h, st] = await Promise.all([
+        api<Summary>(`/api/summary${q}`),
+        api<Position[]>(`/api/positions${q}`),
+        api<Funding[]>(`/api/funding${q}`),
+        api<Point[]>(`/api/history${q}`),
+        api<Status>(`/api/sync/status${b}`),
+      ]);
+      setSummary(s);
+      setPositions(p);
+      setFunding(f);
+      setHistory(h);
+      setStatus(st);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load portfolio");
+    } finally {
+      setLoading(false);
+    }
+  }, [broker, currency]);
+  useEffect(() => {
+    load();
+  }, [load]);
+  useEffect(() => {
+    localStorage.setItem("reportingCurrency", currency);
+  }, [currency]);
+  useEffect(() => {
+    localStorage.setItem("broker", broker);
+  }, [broker]);
+  const refresh = async () => {
+    setRefreshing(true);
+    setError("");
+    try {
+      await api(`/api/sync?broker=${broker}`, { method: "POST" });
+      setStaleDismissed(false);
+      setReconciliationDismissed(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Refresh failed");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  const addCashFlowDate = () => {
+    if (!cashFlowDate) return;
+    const value = cashFlowDate.format("YYYY-MM-DD");
+    if (cashFlowDates.includes(value)) {
+      setError("That cash-flow date is already selected");
+      return;
+    }
+    if (cashFlowDates.length >= 20) {
+      setError("Select no more than 20 cash-flow dates");
+      return;
+    }
+    setCashFlowDates([...cashFlowDates, value].sort());
+    setCashFlowDate(null);
+    setError("");
+  };
+  const fetchCashFlow = async () => {
+    setCashFlowLoading(true);
+    setError("");
+    try {
+      const result = await api<{ rawCount: number; verifiedCount: number }>(
+        "/api/cash-flow/sync?broker=moomoo",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dates: cashFlowDates }),
+        },
+      );
+      setNotice(
+        "Fetched " +
+          result.rawCount +
+          " record" +
+          (result.rawCount === 1 ? "" : "s") +
+          "; " +
+          result.verifiedCount +
+          " verified transfer" +
+          (result.verifiedCount === 1 ? "" : "s") +
+          " shown.",
+      );
+      setCashFlowDates([]);
+      setCashFlowOpen(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Cash-flow sync failed");
+    } finally {
+      setCashFlowLoading(false);
+    }
+  };
+  if (loading)
+    return (
+      <Box sx={{ height: "100vh", display: "grid", placeItems: "center" }}>
+        <CircularProgress aria-label="Loading portfolio" />
+      </Box>
+    );
+  const signed = (value?: string) =>
+      `${Number(value || 0) >= 0 ? "+" : ""}${money(value, currency)}`,
+    pnl = Number(summary?.overallPnl || 0);
+  const cards = summary?.supportsContributions
+    ? [
+        { label: "Total equity", value: money(summary?.totalEquity, currency) },
+        {
+          label: "Net contributions",
+          value: money(summary?.netContributions, currency),
+          info:
+            broker === "tiger"
+              ? "Completed deposits − withdrawals − withdrawal fees + applicable refunds."
+              : "Verified SGD DDI deposits − bank withdrawals. All other cash flows are excluded.",
+        },
+        {
+          label: "Overall P&L",
+          value: signed(summary?.overallPnl),
+          tone: pnl,
+          info: "Total account equity − net contributions.",
+        },
+        {
+          label: "Simple overall return",
+          value:
+            summary?.overallReturnPct == null
+              ? "—"
+              : `${Number(summary.overallReturnPct) >= 0 ? "+" : ""}${Number(summary.overallReturnPct).toFixed(2)}%`,
+          tone: pnl,
+          info: "Overall P&L ÷ net contributions × 100. This is not a time-weighted return or XIRR.",
+        },
+        { label: "Cash", value: money(summary?.cash, currency) },
+        {
+          label: "Holdings value",
+          value: money(summary?.holdingsValue, currency),
+        },
+      ]
+    : [
+        { label: "Total equity", value: money(summary?.totalEquity, currency) },
+        { label: "Cash", value: money(summary?.cash, currency) },
+        {
+          label: "Holdings value",
+          value: money(summary?.holdingsValue, currency),
+        },
+        {
+          label: "Unrealized P&L",
+          value: signed(summary?.unrealizedPnl),
+          tone: Number(summary?.unrealizedPnl || 0),
+          info: "Sum of unrealized P&L returned for listed Moomoo positions.",
+        },
+      ];
+  const stocks = positions.filter((p) => p.asset_type !== "FUND"),
+    funds = positions.filter((p) => p.asset_type === "FUND");
+  const holdingsTotal = Number(summary?.holdingsValue || 0),
+    lastPoint = history.length
+      ? new Date(history.at(-1)!.captured_at).getTime()
+      : 0,
+    days = { "1M": 31, "3M": 93, "1Y": 366, ALL: Infinity }[range];
+  const chartData =
+    range === "ALL"
+      ? history
+      : history.filter(
+          (point) =>
+            new Date(point.captured_at).getTime() >=
+            lastPoint - days * 86400000,
+        );
+  const exportCsv = (dataset: string) => {
+    setExportAnchor(null);
+    window.location.assign(
+      `/api/export/${dataset}?currency=${currency}&broker=${broker}`,
+    );
+  };
+  const chartMetricShown = summary?.supportsContributions
+    ? chartMetric
+    : "total_equity";
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        background: dark
+          ? "radial-gradient(circle at 50% -20%,#282017 0,transparent 38%)"
+          : "radial-gradient(circle at 50% -20%,#fff4e7 0,transparent 42%)",
+      }}
+    >
+      <AppBar
+        position="sticky"
+        color="transparent"
+        elevation={0}
+        sx={{
+          backdropFilter: "blur(20px)",
+          backgroundColor: dark
+            ? "rgba(11,12,14,.78)"
+            : "rgba(255,255,255,.78)",
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Toolbar sx={{ gap: 1.25, maxWidth: 1536, width: "100%", mx: "auto" }}>
+          <Typography
+            variant="h6"
+            sx={{ fontWeight: 800, letterSpacing: "-.03em" }}
+          >
+            Portfolio Tracker
+          </Typography>
+          <Tabs
+            value={broker}
+            onChange={(_, value) => setBroker(value)}
+            sx={{ flexGrow: 1, minHeight: 48 }}
+          >
+            <Tab value="tiger" label="Tiger" />
+            <Tab value="moomoo" label="Moomoo" />
+          </Tabs>
+          <FormControl size="small">
+            <InputLabel id="currency-label">Currency</InputLabel>
+            <Select
+              labelId="currency-label"
+              value={currency}
+              label="Currency"
+              onChange={(e) => setCurrency(e.target.value as Currency)}
+            >
+              <MenuItem value="SGD">SGD</MenuItem>
+              <MenuItem value="USD">USD</MenuItem>
+            </Select>
+          </FormControl>
+          <Tooltip title={dark ? "Use light mode" : "Use dark mode"}>
+            <IconButton
+              onClick={onToggleTheme}
+              aria-label={dark ? "Use light mode" : "Use dark mode"}
+            >
+              {dark ? <LightModeOutlined /> : <DarkModeOutlined />}
+            </IconButton>
+          </Tooltip>
+          <Chip size="small" label="Live" color="success" variant="outlined" />
+          <Button
+            variant="outlined"
+            startIcon={<FileDownloadOutlined />}
+            onClick={(event) => setExportAnchor(event.currentTarget)}
+          >
+            Export
+          </Button>
+          <Menu
+            anchorEl={exportAnchor}
+            open={Boolean(exportAnchor)}
+            onClose={() => setExportAnchor(null)}
+          >
+            <MenuItem onClick={() => exportCsv("positions")}>
+              Positions CSV
+            </MenuItem>
+            <MenuItem onClick={() => exportCsv("funding")}>
+              {broker === "tiger" ? "Funding" : "Deposits & withdrawals"} CSV
+            </MenuItem>
+            <MenuItem onClick={() => exportCsv("history")}>
+              Portfolio history CSV
+            </MenuItem>
+          </Menu>
+          <Button
+            variant="contained"
+            startIcon={
+              refreshing ? (
+                <CircularProgress size={16} color="inherit" />
+              ) : (
+                <Refresh />
+              )
+            }
+            onClick={refresh}
+            disabled={refreshing}
+          >
+            Refresh
+          </Button>
+        </Toolbar>
+      </AppBar>
+      <Container maxWidth="xl" sx={{ py: { xs: 3, md: 6 } }}>
+        <Stack spacing={3}>
+          {error && (
+            <Alert severity="error" onClose={() => setError("")}>
+              {error}
+              {status?.lastSuccess &&
+                " Previously synced data remains available."}
+            </Alert>
+          )}
+          {notice && (
+            <Alert severity="success" onClose={() => setNotice("")}>
+              {notice}
+            </Alert>
+          )}
+          {status?.stale && status.lastSuccess && !staleDismissed && (
+            <Alert severity="warning" onClose={() => setStaleDismissed(true)}>
+              Portfolio data may be stale. Refresh for current values.
+            </Alert>
+          )}
+          {Math.abs(Number(summary?.reconciliationDifference || 0)) > 1 &&
+            !reconciliationDismissed && (
+              <Alert
+                severity="warning"
+                onClose={() => setReconciliationDismissed(true)}
+              >
+                Account reconciliation differs by{" "}
+                {money(summary?.reconciliationDifference, currency)}. Cash plus
+                listed positions does not match total equity; check Sync health
+                and refresh.
+              </Alert>
+            )}
+          {summary?.empty && (
+            <Alert
+              severity="info"
+              action={<Button onClick={refresh}>Sync now</Button>}
+            >
+              No portfolio data yet.
+            </Alert>
+          )}
+          <Box>
+            <Typography variant="h4">
+              Your {broker === "tiger" ? "Tiger" : "Moomoo"} portfolio
+            </Typography>
+            <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+              Reporting in {currency} · Last{" "}
+              {broker === "tiger" ? "Tiger" : "Moomoo"} sync{" "}
+              {status?.lastSuccess
+                ? new Date(status.lastSuccess).toLocaleString()
+                : "never"}
+            </Typography>
+          </Box>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: {
+                xs: "1fr 1fr",
+                md: "repeat(3,1fr)",
+                lg: "repeat(6,1fr)",
+              },
+              gap: 2,
+            }}
+          >
+            {cards.map((card) => (
+              <Card
+                key={card.label}
+                variant="outlined"
+                sx={{
+                  borderColor: "divider",
+                  boxShadow: "0 10px 35px rgba(0,0,0,.04)",
+                  transition: "transform .2s, box-shadow .2s",
+                  "&:hover": {
+                    transform: "translateY(-2px)",
+                    boxShadow: "0 14px 40px rgba(0,0,0,.08)",
+                  },
+                }}
+              >
+                <CardContent sx={{ p: 2.5 }}>
+                  <Box sx={{ display: "flex", alignItems: "center" }}>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ flexGrow: 1 }}
+                    >
+                      {card.label}
+                    </Typography>
+                    {card.info && (
+                      <Tooltip title={card.info} arrow>
+                        <IconButton
+                          size="small"
+                          aria-label={`How ${card.label.toLowerCase()} is calculated`}
+                        >
+                          <InfoOutlined sx={{ fontSize: 17 }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                  </Box>
+                  <Typography
+                    variant="h6"
+                    sx={{
+                      fontWeight: 760,
+                      mt: 1,
+                      color:
+                        card.tone == null
+                          ? "text.primary"
+                          : card.tone >= 0
+                            ? "success.main"
+                            : "error.main",
+                    }}
+                  >
+                    {card.value}
+                  </Typography>
+                </CardContent>
+              </Card>
+            ))}
+          </Box>
+          <Section
+            title="Portfolio progress"
+            subtitle={
+              chartMetricShown === "performance_value"
+                ? "Equity adjusted for deposits and withdrawals"
+                : "Raw account equity over time"
+            }
+          >
+            <Box sx={{ p: { xs: 2, md: 3 } }}>
+              <Stack
+                direction={{ xs: "column", sm: "row" }}
+                justifyContent="space-between"
+                spacing={1.5}
+                sx={{ mb: 2 }}
+              >
+                {summary?.supportsContributions ? (
+                  <ToggleButtonGroup
+                    size="small"
+                    exclusive
+                    value={chartMetric}
+                    onChange={(_, value) => value && setChartMetric(value)}
+                  >
+                    <ToggleButton value="performance_value">
+                      Performance
+                    </ToggleButton>
+                    <ToggleButton value="total_equity">Equity</ToggleButton>
+                  </ToggleButtonGroup>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    History starts with the first successful Moomoo sync.
+                  </Typography>
+                )}
+                <ToggleButtonGroup
+                  size="small"
+                  exclusive
+                  value={range}
+                  onChange={(_, value) => value && setRange(value)}
+                >
+                  {(["1M", "3M", "1Y", "ALL"] as const).map((value) => (
+                    <ToggleButton value={value} key={value}>
+                      {value === "ALL" ? "All" : value}
+                    </ToggleButton>
+                  ))}
+                </ToggleButtonGroup>
+              </Stack>
+              <LineChart
+                data={chartData}
+                currency={currency}
+                metric={chartMetricShown}
+              />
+              {summary?.supportsContributions && (
+                <Stack
+                  direction="row"
+                  alignItems="center"
+                  spacing={1}
+                  sx={{ mt: 1, color: "text.secondary" }}
+                >
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 0.5,
+                      bgcolor: "primary.main",
+                    }}
+                  />
+                  <Typography variant="caption">Funding activity</Typography>
+                </Stack>
+              )}
+            </Box>
+          </Section>
+          <Section
+            title="Stocks & ETFs"
+            subtitle={`${stocks.length} current holding${stocks.length === 1 ? "" : "s"}`}
+          >
+            <HoldingsTable
+              rows={stocks}
+              currency={currency}
+              total={holdingsTotal}
+              empty="No stock or ETF holdings"
+            />
+          </Section>
+          <Section
+            title="Money market & funds"
+            subtitle={`${funds.length} current fund holding${funds.length === 1 ? "" : "s"}`}
+          >
+            <HoldingsTable
+              rows={funds}
+              currency={currency}
+              total={holdingsTotal}
+              empty="No money-market or fund holdings"
+            />
+          </Section>
+          <Section
+            title={
+              broker === "tiger" ? "Funding history" : "Deposits & withdrawals"
+            }
+            subtitle={`${funding.length} verified transaction${funding.length === 1 ? "" : "s"}`}
+            initial={false}
+          >
+            <>
+              {broker === "moomoo" && (
+                <Box
+                  sx={{
+                    p: 2,
+                    borderBottom: 1,
+                    borderColor: "divider",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 2,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Button
+                    variant="outlined"
+                    onClick={() => setCashFlowOpen(true)}
+                  >
+                    Fetch cash flow
+                  </Button>
+                  <Typography variant="body2" color="text.secondary">
+                    {"Last cash-flow sync: " +
+                      (status?.cashFlowLastSuccess
+                        ? new Date(status.cashFlowLastSuccess).toLocaleString()
+                        : "never")}
+                  </Typography>
+                </Box>
+              )}
+              <TableContainer>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      {(broker === "tiger"
+                        ? ["Date", "Type", "Transaction ID", "Status", "Amount"]
+                        : ["Date", "Type", "Direction", "Reference", "Amount"]
+                      ).map((x, i, a) => (
+                        <TableCell
+                          key={x}
+                          align={i === a.length - 1 ? "right" : "left"}
+                          sx={{ color: "text.secondary", fontWeight: 650 }}
+                        >
+                          {x}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {funding.length ? (
+                      funding.map((f) => (
+                        <TableRow key={f.transaction_id} hover>
+                          <TableCell>
+                            {new Date(
+                              `${f.business_date}T00:00:00`,
+                            ).toLocaleDateString()}
+                          </TableCell>
+                          <TableCell sx={{ fontWeight: 650 }}>
+                            {f.type_label}
+                          </TableCell>
+                          {broker === "tiger" ? (
+                            <>
+                              <TableCell>{f.transaction_id}</TableCell>
+                              <TableCell>
+                                <Chip
+                                  size="small"
+                                  label={f.completed ? "Completed" : "Pending"}
+                                  color={f.completed ? "success" : "default"}
+                                  variant="outlined"
+                                />
+                              </TableCell>
+                            </>
+                          ) : (
+                            <>
+                              <TableCell>{f.direction || "—"}</TableCell>
+                              <TableCell
+                                sx={{ maxWidth: 420, whiteSpace: "normal" }}
+                              >
+                                {f.remark || "—"}
+                              </TableCell>
+                            </>
+                          )}
+                          <TableCell align="right" sx={{ fontWeight: 650 }}>
+                            {money(f.amount, f.display_currency)}
+                            {broker === "tiger" &&
+                              currency !== f.original_currency && (
+                                <Typography
+                                  variant="caption"
+                                  display="block"
+                                  color="text.secondary"
+                                >
+                                  Originally {f.original_currency}
+                                </Typography>
+                              )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={5} align="center" sx={{ py: 5 }}>
+                          No verified{" "}
+                          {broker === "tiger"
+                            ? "funding transactions"
+                            : "deposits or withdrawals"}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          </Section>
+          <Section
+            title="Sync health"
+            subtitle={`Latest ${broker === "tiger" ? "Tiger" : "Moomoo"} data-source status`}
+            initial={false}
+          >
+            <Box
+              sx={{
+                p: { xs: 2, md: 3 },
+                display: "flex",
+                gap: 1.25,
+                flexWrap: "wrap",
+              }}
+            >
+              {Object.entries(status?.components || {}).map(([name, value]) => (
+                <Chip
+                  key={name}
+                  label={`${name.replaceAll("_", " ")}: ${value}`}
+                  color={
+                    value === "ok"
+                      ? "success"
+                      : value.includes("fallback")
+                        ? "warning"
+                        : "default"
+                  }
+                  variant="outlined"
+                />
+              ))}
+              {broker === "moomoo" && status?.cashFlowLastSuccess && (
+                <Chip
+                  label={`cash flow last synced: ${new Date(status.cashFlowLastSuccess).toLocaleString()}`}
+                  color="success"
+                  variant="outlined"
+                />
+              )}
+              {!Object.keys(status?.components || {}).length && (
+                <Typography color="text.secondary">
+                  Run a fresh sync to record component health.
+                </Typography>
+              )}
+            </Box>
+          </Section>
+        </Stack>
+      </Container>
+      <Dialog
+        open={cashFlowOpen}
+        onClose={() => !cashFlowLoading && setCashFlowOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Fetch Moomoo cash flow</DialogTitle>
+        <DialogContent>
+          <Typography color="text.secondary" sx={{ mb: 2 }}>
+            Add up to 20 known deposit or withdrawal dates. Moomoo is queried
+            once per date.
+          </Typography>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+            <LocalizationProvider dateAdapter={AdapterDayjs}>
+              <DatePicker
+                label="Cash-flow date"
+                value={cashFlowDate}
+                onChange={setCashFlowDate}
+                disableFuture
+                format="DD/MM/YYYY"
+                shouldDisableDate={(value) =>
+                  cashFlowDates.includes(value.format("YYYY-MM-DD"))
+                }
+                slotProps={{ textField: { fullWidth: true } }}
+              />
+            </LocalizationProvider>
+            <Button
+              onClick={addCashFlowDate}
+              disabled={!cashFlowDate || cashFlowDates.length >= 20}
+            >
+              Add
+            </Button>
+          </Stack>
+          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 2 }}>
+            {cashFlowDates.map((value) => (
+              <Chip
+                key={value}
+                label={new Date(value + "T00:00:00").toLocaleDateString()}
+                onDelete={() =>
+                  setCashFlowDates(
+                    cashFlowDates.filter((item) => item !== value),
+                  )
+                }
+                disabled={cashFlowLoading}
+              />
+            ))}
+          </Box>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            display="block"
+            sx={{ mt: 2 }}
+          >
+            {cashFlowDates.length}/20 dates selected
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setCashFlowOpen(false)}
+            disabled={cashFlowLoading}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={fetchCashFlow}
+            disabled={!cashFlowDates.length || cashFlowLoading}
+          >
+            {cashFlowLoading ? (
+              <CircularProgress size={18} color="inherit" />
+            ) : (
+              "Fetch cash flow"
+            )}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
 }

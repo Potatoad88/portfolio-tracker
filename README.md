@@ -159,6 +159,7 @@ The command backs up every broker database that exists into the ignored `backups
 ## Tests and build
 
 ```sh
+npm --prefix frontend run format
 PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
