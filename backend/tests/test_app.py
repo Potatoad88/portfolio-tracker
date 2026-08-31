@@ -367,7 +367,9 @@ class EndpointTests(unittest.TestCase):
         main.moomoo_db.sync(replace(snapshot(), positions=()), flows, [])
         with patch.dict(os.environ, {"MOOMOO_MANUAL_WITHDRAWALS": "2026-01-03:50"}):
             result = main.summary("SGD", "moomoo")
+            overview = main.overview("SGD")
         self.assertEqual(result["netContributions"], "350")
+        self.assertEqual((overview["netContributions"], overview["overallPnl"]), ("439", "-239"))
 
     def test_moomoo_portfolio_sync_does_not_fetch_cash_flow(self):
         calls = []
@@ -438,6 +440,83 @@ class EndpointTests(unittest.TestCase):
             result = main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]))
         self.assertEqual((result["rawCount"], result["verifiedCount"]), (0, 0))
         self.assertIsNotNone(main.status("moomoo")["cashFlowLastSuccess"])
+
+    def test_overview_aggregates_cached_brokers_and_assets(self):
+        result = main.overview("SGD")
+        self.assertEqual((result["totalEquity"], result["netContributions"], result["overallPnl"]),
+                         ("300", "89", "211"))
+        self.assertEqual((result["cash"], result["holdingsValue"]), ("138", "162"))
+        self.assertEqual((result["stocksValue"], result["fundsValue"], result["otherHoldingsValue"]), ("12", "0", "150"))
+        self.assertEqual(result["brokerCount"], 2)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["brokers"][0]["allocationPct"], str(Decimal("100") / Decimal("300") * 100))
+
+    def test_overview_hides_immaterial_unclassified_rounding(self):
+        main.db.sync(replace(snapshot(), holdings_value=Decimal("12.50")), [], [])
+        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+                                    holdings_value=Decimal("150"), positions=()), [], [])
+        self.assertEqual(main.overview("SGD")["otherHoldingsValue"], "150")
+
+    def test_overview_uses_each_brokers_fx_rate_without_adapters(self):
+        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+                                    holdings_value=Decimal("150"), positions=(), sgd_to_usd=Decimal("0.5")), [], [])
+        with patch.object(main, "tiger_adapter", side_effect=AssertionError("adapter called")), \
+             patch.object(main, "MoomooAdapter", side_effect=AssertionError("adapter called")):
+            result = main.overview("USD")
+        self.assertEqual((result["totalEquity"], result["netContributions"], result["overallPnl"]),
+                         ("175.00", "66.75", "108.25"))
+        self.assertEqual((result["cash"], result["holdingsValue"]), ("91.00", "84.00"))
+
+    def test_overview_marks_missing_broker_without_hiding_available_data(self):
+        handle, empty_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        original = main.moomoo_db
+        try:
+            main.moomoo_db = Database(empty_path)
+            result = main.overview("SGD")
+        finally:
+            main.moomoo_db = original
+            os.unlink(empty_path)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["missingBrokers"], ["moomoo"])
+        self.assertEqual((result["brokerCount"], result["totalEquity"]), (1, "100"))
+        self.assertFalse(result["brokers"][1]["hasData"])
+
+    def test_overview_handles_both_brokers_missing(self):
+        first_handle, first_path = tempfile.mkstemp(suffix=".db")
+        second_handle, second_path = tempfile.mkstemp(suffix=".db")
+        os.close(first_handle)
+        os.close(second_handle)
+        original = main.db, main.moomoo_db
+        try:
+            main.db, main.moomoo_db = Database(first_path), Database(second_path)
+            result = main.overview("SGD")
+        finally:
+            main.db, main.moomoo_db = original
+            os.unlink(first_path)
+            os.unlink(second_path)
+        self.assertEqual((result["brokerCount"], result["totalEquity"]), (0, "0"))
+        self.assertEqual(result["missingBrokers"], ["tiger", "moomoo"])
+
+    def test_overview_rejects_unsupported_currency(self):
+        messages = []
+
+        async def request():
+            scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                     "method": "GET", "scheme": "http", "path": "/api/overview",
+                     "raw_path": b"/api/overview", "query_string": b"currency=EUR",
+                     "headers": [], "client": ("test", 1), "server": ("test", 80)}
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                messages.append(message)
+
+            await main.app(scope, receive, send)
+
+        asyncio.run(request())
+        self.assertEqual(messages[0]["status"], 422)
 
     def test_invalid_broker_is_rejected(self):
         with self.assertRaisesRegex(main.HTTPException, "Broker must be"):

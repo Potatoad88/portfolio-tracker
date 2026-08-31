@@ -55,6 +55,30 @@ import {
 
 type Currency = "SGD" | "USD";
 type Broker = "tiger" | "moomoo";
+type View = "home" | Broker;
+type OverviewBroker = {
+  broker: Broker;
+  hasData: boolean;
+  totalEquity: string;
+  allocationPct: string;
+  lastSuccess: string | null;
+  lastError: string | null;
+  stale: boolean;
+};
+type Overview = {
+  complete: boolean;
+  missingBrokers: Broker[];
+  brokerCount: number;
+  totalEquity: string;
+  netContributions: string;
+  overallPnl: string;
+  cash: string;
+  holdingsValue: string;
+  stocksValue: string;
+  fundsValue: string;
+  otherHoldingsValue: string;
+  brokers: OverviewBroker[];
+};
 type Summary = {
   empty: boolean;
   supportsContributions: boolean;
@@ -506,6 +530,391 @@ function HoldingsTable({
   );
 }
 
+function HomePage({
+  overview,
+  currency,
+  view,
+  dark,
+  onCurrency,
+  onNavigate,
+  onToggleTheme,
+  error,
+}: {
+  overview: Overview;
+  currency: Currency;
+  view: View;
+  dark: boolean;
+  onCurrency: (currency: Currency) => void;
+  onNavigate: (view: View) => void;
+  onToggleTheme: () => void;
+  error: string;
+}) {
+  const assetRows = [
+    {
+      label: "Stocks & ETFs",
+      value: overview.stocksValue,
+      color: "primary.main",
+    },
+    {
+      label: "Money market & funds",
+      value: overview.fundsValue,
+      color: "warning.main",
+    },
+    { label: "Cash", value: overview.cash, color: "success.main" },
+    ...(Number(overview.otherHoldingsValue)
+      ? [
+          {
+            label: "Other / unclassified",
+            value: overview.otherHoldingsValue,
+            color: "text.secondary",
+          },
+        ]
+      : []),
+  ];
+  const assetTotal = assetRows.reduce((sum, row) => sum + Number(row.value), 0);
+  const title = (broker: Broker) => (broker === "tiger" ? "Tiger" : "Moomoo");
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        background: dark
+          ? "radial-gradient(circle at 50% -20%,#282017 0,transparent 38%)"
+          : "radial-gradient(circle at 50% -20%,#fff4e7 0,transparent 42%)",
+      }}
+    >
+      <AppBar
+        position="sticky"
+        color="transparent"
+        elevation={0}
+        sx={{
+          backdropFilter: "blur(20px)",
+          backgroundColor: dark
+            ? "rgba(11,12,14,.78)"
+            : "rgba(255,255,255,.78)",
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Toolbar sx={{ gap: 1.25, maxWidth: 1536, width: "100%", mx: "auto" }}>
+          <Typography
+            variant="h6"
+            sx={{ fontWeight: 800, letterSpacing: "-.03em" }}
+          >
+            Portfolio Tracker
+          </Typography>
+          <Tabs
+            value={view}
+            onChange={(_, value) => onNavigate(value)}
+            sx={{ flexGrow: 1, minHeight: 48 }}
+          >
+            <Tab value="home" label="Home" />
+            <Tab value="tiger" label="Tiger" />
+            <Tab value="moomoo" label="Moomoo" />
+          </Tabs>
+          <FormControl size="small">
+            <InputLabel id="home-currency-label">Currency</InputLabel>
+            <Select
+              labelId="home-currency-label"
+              value={currency}
+              label="Currency"
+              onChange={(event) => onCurrency(event.target.value as Currency)}
+            >
+              <MenuItem value="SGD">SGD</MenuItem>
+              <MenuItem value="USD">USD</MenuItem>
+            </Select>
+          </FormControl>
+          <Tooltip title={dark ? "Use light mode" : "Use dark mode"}>
+            <IconButton
+              onClick={onToggleTheme}
+              aria-label={dark ? "Use light mode" : "Use dark mode"}
+            >
+              {dark ? <LightModeOutlined /> : <DarkModeOutlined />}
+            </IconButton>
+          </Tooltip>
+        </Toolbar>
+      </AppBar>
+      <Container maxWidth="xl" sx={{ py: { xs: 3, md: 6 } }}>
+        <Stack spacing={3}>
+          {error && <Alert severity="error">{error}</Alert>}
+          {!overview.complete && overview.brokerCount > 0 && (
+            <Alert severity="info">
+              Overall totals include available data only.{" "}
+              {overview.missingBrokers.map(title).join(" and ")} has not synced
+              yet.
+            </Alert>
+          )}
+          <Box>
+            <Typography variant="h4">Overall portfolio</Typography>
+            <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+              Latest locally cached values · Reporting in {currency}
+            </Typography>
+          </Box>
+          {overview.brokerCount === 0 ? (
+            <Alert severity="info">
+              No cached portfolio data yet. Open Tiger or Moomoo to run the
+              first sync.
+            </Alert>
+          ) : (
+            <>
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: {
+                    xs: "1fr 1fr",
+                    md: "repeat(3,1fr)",
+                    lg: "repeat(6,1fr)",
+                  },
+                  gap: 2,
+                }}
+              >
+                {[
+                  {
+                    label: "Total equity",
+                    value: money(overview.totalEquity, currency),
+                  },
+                  {
+                    label: "Net contributions",
+                    value: money(overview.netContributions, currency),
+                  },
+                  {
+                    label: "Overall P&L",
+                    value: `${Number(overview.overallPnl) >= 0 ? "+" : ""}${money(overview.overallPnl, currency)}`,
+                    tone: Number(overview.overallPnl),
+                    info: "Combined total equity − combined net contributions. Accuracy depends on complete deposit and withdrawal history for both brokers.",
+                  },
+                  { label: "Cash", value: money(overview.cash, currency) },
+                  {
+                    label: "Holdings value",
+                    value: money(overview.holdingsValue, currency),
+                  },
+                  {
+                    label: "Brokers represented",
+                    value: `${overview.brokerCount} of 2`,
+                  },
+                ].map((card) => (
+                  <Card key={card.label} variant="outlined">
+                    <CardContent>
+                      <Stack direction="row" alignItems="center">
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          sx={{ flexGrow: 1 }}
+                        >
+                          {card.label}
+                        </Typography>
+                        {card.info && (
+                          <Tooltip title={card.info} arrow>
+                            <IconButton
+                              size="small"
+                              aria-label="How overall P&L is calculated"
+                            >
+                              <InfoOutlined sx={{ fontSize: 17 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                      <Typography
+                        variant="h6"
+                        sx={{
+                          mt: 1,
+                          fontWeight: 760,
+                          color:
+                            card.tone == null
+                              ? "text.primary"
+                              : card.tone >= 0
+                                ? "success.main"
+                                : "error.main",
+                        }}
+                      >
+                        {card.value}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                ))}
+              </Box>
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
+                  gap: 3,
+                }}
+              >
+                <Paper
+                  variant="outlined"
+                  sx={{ p: { xs: 2.5, md: 3 }, borderRadius: 3 }}
+                >
+                  <Typography variant="h6" sx={{ mb: 2 }}>
+                    Broker allocation
+                  </Typography>
+                  <Stack spacing={2.5}>
+                    {overview.brokers
+                      .filter((item) => item.hasData)
+                      .map((item) => (
+                        <Box key={item.broker}>
+                          <Stack direction="row" justifyContent="space-between">
+                            <Typography fontWeight={650}>
+                              {title(item.broker)}
+                            </Typography>
+                            <Typography>
+                              {money(item.totalEquity, currency)} ·{" "}
+                              {Number(item.allocationPct).toFixed(1)}%
+                            </Typography>
+                          </Stack>
+                          <Box
+                            sx={{
+                              height: 8,
+                              mt: 1,
+                              borderRadius: 8,
+                              bgcolor: "action.hover",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <Box
+                              sx={{
+                                height: "100%",
+                                width: `${item.allocationPct}%`,
+                                bgcolor:
+                                  item.broker === "tiger"
+                                    ? "primary.main"
+                                    : "warning.main",
+                              }}
+                            />
+                          </Box>
+                        </Box>
+                      ))}
+                  </Stack>
+                </Paper>
+                <Paper
+                  variant="outlined"
+                  sx={{ p: { xs: 2.5, md: 3 }, borderRadius: 3 }}
+                >
+                  <Typography variant="h6" sx={{ mb: 2 }}>
+                    Asset allocation
+                  </Typography>
+                  <Stack spacing={2.5}>
+                    {assetRows
+                      .filter((row) => Number(row.value))
+                      .map((row) => {
+                        const percentage = assetTotal
+                          ? (Number(row.value) / assetTotal) * 100
+                          : 0;
+                        return (
+                          <Box key={row.label}>
+                            <Stack
+                              direction="row"
+                              justifyContent="space-between"
+                            >
+                              <Typography fontWeight={650}>
+                                {row.label}
+                              </Typography>
+                              <Typography>
+                                {money(row.value, currency)} ·{" "}
+                                {percentage.toFixed(1)}%
+                              </Typography>
+                            </Stack>
+                            <Box
+                              sx={{
+                                height: 8,
+                                mt: 1,
+                                borderRadius: 8,
+                                bgcolor: "action.hover",
+                                overflow: "hidden",
+                              }}
+                            >
+                              <Box
+                                sx={{
+                                  height: "100%",
+                                  width: `${percentage}%`,
+                                  bgcolor: row.color,
+                                }}
+                              />
+                            </Box>
+                          </Box>
+                        );
+                      })}
+                  </Stack>
+                </Paper>
+              </Box>
+            </>
+          )}
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
+              gap: 2,
+            }}
+          >
+            {overview.brokers.map((item) => (
+              <Card
+                key={item.broker}
+                variant="outlined"
+                onClick={() => onNavigate(item.broker)}
+                sx={{
+                  cursor: "pointer",
+                  transition: "transform .2s",
+                  "&:hover": { transform: "translateY(-2px)" },
+                }}
+              >
+                <CardContent>
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                  >
+                    <Typography variant="h6">{title(item.broker)}</Typography>
+                    <Chip
+                      size="small"
+                      label={
+                        !item.hasData
+                          ? "Not synced"
+                          : item.lastError
+                            ? "Error"
+                            : item.stale
+                              ? "Stale"
+                              : "Current"
+                      }
+                      color={
+                        !item.hasData
+                          ? "default"
+                          : item.lastError
+                            ? "error"
+                            : item.stale
+                              ? "warning"
+                              : "success"
+                      }
+                      variant="outlined"
+                    />
+                  </Stack>
+                  <Typography variant="h5" sx={{ mt: 2, fontWeight: 760 }}>
+                    {item.hasData
+                      ? money(item.totalEquity, currency)
+                      : "No cached data"}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mt: 1 }}
+                  >
+                    Last sync:{" "}
+                    {item.lastSuccess
+                      ? new Date(item.lastSuccess).toLocaleString()
+                      : "never"}
+                  </Typography>
+                  {item.lastError && (
+                    <Typography variant="body2" color="error" sx={{ mt: 1 }}>
+                      {item.lastError}
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </Box>
+        </Stack>
+      </Container>
+    </Box>
+  );
+}
+
 export default function App({
   dark,
   onToggleTheme,
@@ -513,13 +922,17 @@ export default function App({
   dark: boolean;
   onToggleTheme: () => void;
 }) {
-  const [broker, setBroker] = useState<Broker>(() =>
-    localStorage.getItem("broker") === "moomoo" ? "moomoo" : "tiger",
-  );
+  const [view, setView] = useState<View>(() => {
+    const stored =
+      localStorage.getItem("portfolioView") || localStorage.getItem("broker");
+    return stored === "tiger" || stored === "moomoo" ? stored : "home";
+  });
+  const broker: Broker = view === "moomoo" ? "moomoo" : "tiger";
   const [currency, setCurrency] = useState<Currency>(() =>
     localStorage.getItem("reportingCurrency") === "USD" ? "USD" : "SGD",
   );
-  const [summary, setSummary] = useState<Summary | null>(null),
+  const [overview, setOverview] = useState<Overview | null>(null),
+    [summary, setSummary] = useState<Summary | null>(null),
     [positions, setPositions] = useState<Position[]>([]),
     [funding, setFunding] = useState<Funding[]>([]),
     [history, setHistory] = useState<Point[]>([]),
@@ -542,27 +955,31 @@ export default function App({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const q = `?currency=${currency}&broker=${broker}`,
-        b = `?broker=${broker}`;
-      const [s, p, f, h, st] = await Promise.all([
-        api<Summary>(`/api/summary${q}`),
-        api<Position[]>(`/api/positions${q}`),
-        api<Funding[]>(`/api/funding${q}`),
-        api<Point[]>(`/api/history${q}`),
-        api<Status>(`/api/sync/status${b}`),
-      ]);
-      setSummary(s);
-      setPositions(p);
-      setFunding(f);
-      setHistory(h);
-      setStatus(st);
+      if (view === "home") {
+        setOverview(await api<Overview>(`/api/overview?currency=${currency}`));
+      } else {
+        const q = `?currency=${currency}&broker=${broker}`,
+          b = `?broker=${broker}`;
+        const [s, p, f, h, st] = await Promise.all([
+          api<Summary>(`/api/summary${q}`),
+          api<Position[]>(`/api/positions${q}`),
+          api<Funding[]>(`/api/funding${q}`),
+          api<Point[]>(`/api/history${q}`),
+          api<Status>(`/api/sync/status${b}`),
+        ]);
+        setSummary(s);
+        setPositions(p);
+        setFunding(f);
+        setHistory(h);
+        setStatus(st);
+      }
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load portfolio");
     } finally {
       setLoading(false);
     }
-  }, [broker, currency]);
+  }, [broker, currency, view]);
   useEffect(() => {
     load();
   }, [load]);
@@ -570,8 +987,8 @@ export default function App({
     localStorage.setItem("reportingCurrency", currency);
   }, [currency]);
   useEffect(() => {
-    localStorage.setItem("broker", broker);
-  }, [broker]);
+    localStorage.setItem("portfolioView", view);
+  }, [view]);
   const refresh = async () => {
     setRefreshing(true);
     setError("");
@@ -638,6 +1055,34 @@ export default function App({
       <Box sx={{ height: "100vh", display: "grid", placeItems: "center" }}>
         <CircularProgress aria-label="Loading portfolio" />
       </Box>
+    );
+  if (view === "home")
+    return (
+      <HomePage
+        overview={
+          overview || {
+            complete: false,
+            missingBrokers: ["tiger", "moomoo"],
+            brokerCount: 0,
+            totalEquity: "0",
+            netContributions: "0",
+            overallPnl: "0",
+            cash: "0",
+            holdingsValue: "0",
+            stocksValue: "0",
+            fundsValue: "0",
+            otherHoldingsValue: "0",
+            brokers: [],
+          }
+        }
+        error={error}
+        currency={currency}
+        view={view}
+        dark={dark}
+        onCurrency={setCurrency}
+        onNavigate={setView}
+        onToggleTheme={onToggleTheme}
+      />
     );
   const signed = (value?: string) =>
       `${Number(value || 0) >= 0 ? "+" : ""}${money(value, currency)}`,
@@ -742,10 +1187,11 @@ export default function App({
             Portfolio Tracker
           </Typography>
           <Tabs
-            value={broker}
-            onChange={(_, value) => setBroker(value)}
+            value={view}
+            onChange={(_, value) => setView(value)}
             sx={{ flexGrow: 1, minHeight: 48 }}
           >
+            <Tab value="home" label="Home" />
             <Tab value="tiger" label="Tiger" />
             <Tab value="moomoo" label="Moomoo" />
           </Tabs>

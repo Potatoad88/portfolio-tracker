@@ -104,6 +104,7 @@ The backend uses Python `Decimal` and serializes money as strings.
 - **Tiger simple return** = overall P&L ÷ net contributions × 100; it is not TWR or XIRR.
 - **Moomoo net contributions** = verified SGD DDI deposits − explicit and locally confirmed bank withdrawals. Unclassified raw cash flows contribute zero.
 - **Moomoo overall P&L and simple return** use the same formulas as Tiger after that conservative classification.
+- **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is accurate only when both brokers’ deposit and withdrawal histories are complete.
 - **Holdings value** = total equity − cash.
 - **Reconciliation difference** = total equity − cash − displayed positions.
 - **Moomoo unrealized P&L** = sum of unrealized P&L returned for listed positions; aggregate fund P&L is unavailable.
@@ -118,6 +119,7 @@ Every endpoint accepts `broker=tiger|moomoo`; omitting it preserves the original
 | --- | --- | --- | --- |
 | `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store current portfolio data | Yes |
 | `POST` | `/api/cash-flow/sync?broker=moomoo` | Fetch up to 20 explicitly selected cash-flow dates | Yes |
+| `GET` | `/api/overview?currency=SGD` | Cached cross-broker totals, allocation, and health | No |
 | `GET` | `/api/summary?currency=SGD&broker=moomoo` | Summary and capabilities | No |
 | `GET` | `/api/positions?currency=SGD&broker=moomoo` | Latest positions | No |
 | `GET` | `/api/funding?currency=SGD&broker=tiger` | Tiger funding history | No |
@@ -138,7 +140,7 @@ backend/
   main.py             Broker-aware FastAPI endpoints
   models.py           Immutable normalized records
 frontend/src/
-  App.tsx              Shared broker-tab dashboard
+  App.tsx              Cached home and broker-tab dashboards
   main.tsx             Theme and React entry point
 scripts/
   backup_database.py   Consistent broker database backups
@@ -164,7 +166,7 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
-Tests cover financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
+Tests cover financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, cached overview aggregation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
 
 GitHub Actions runs these checks on every push and pull request. Use `npm --prefix frontend run format` to apply frontend formatting locally.
 

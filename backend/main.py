@@ -40,6 +40,13 @@ def converted(value: str, factor: Decimal) -> str:
     return str(Decimal(value) * factor)
 
 
+def is_stale(last_success: str | None) -> bool:
+    if not last_success:
+        return True
+    stale_minutes = int(os.getenv("PORTFOLIO_STALE_MINUTES", os.getenv("TIGER_STALE_MINUTES", "60")))
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(last_success)).total_seconds() > stale_minutes * 60
+
+
 def funding_items(store: Database) -> list[Funding]:
     return [Funding(row["transaction_id"], row["type"], row["currency"], Decimal(row["amount"]),
                     datetime.fromisoformat(row["business_date"]).date(), bool(row["completed"]), row["direction"],
@@ -141,6 +148,46 @@ def summary(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     return result
 
 
+@app.get("/api/overview")
+def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
+    keys = ("totalEquity", "netContributions", "cash", "holdingsValue", "stocksValue", "fundsValue", "otherHoldingsValue")
+    totals = {key: Decimal() for key in keys}
+    brokers = []
+    missing = []
+    for name, store in (("tiger", db), ("moomoo", moomoo_db)):
+        snap = store.one("SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
+        state = store.one("SELECT last_success,last_error FROM sync_state WHERE id=1") or {}
+        if not snap:
+            missing.append(name)
+            brokers.append({"broker": name, "hasData": False, "totalEquity": "0", "allocationPct": "0",
+                            "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"), "stale": True})
+            continue
+        factor = currency_factor(currency, snap)
+        rows = store.rows("SELECT market_value,asset_type FROM positions WHERE snapshot_id=?", (snap["id"],))
+        stocks = sum((Decimal(row["market_value"]) for row in rows if row["asset_type"] != "FUND"), Decimal())
+        funds = sum((Decimal(row["market_value"]) for row in rows if row["asset_type"] == "FUND"), Decimal())
+        holdings = Decimal(snap["holdings_value"])
+        unclassified = holdings - stocks - funds
+        if abs(unclassified) < Decimal("1"):
+            unclassified = Decimal()
+        values = {"totalEquity": Decimal(snap["total_equity"]),
+                  "netContributions": net_contributions(contribution_items(store, name)),
+                  "cash": Decimal(snap["cash"]), "holdingsValue": holdings,
+                  "stocksValue": stocks, "fundsValue": funds,
+                  "otherHoldingsValue": max(unclassified, Decimal())}
+        for key, value in values.items():
+            totals[key] += value * factor
+        brokers.append({"broker": name, "hasData": True, "totalEquity": str(values["totalEquity"] * factor),
+                        "allocationPct": "0", "lastSuccess": state.get("last_success"),
+                        "lastError": state.get("last_error"), "stale": is_stale(state.get("last_success"))})
+    for item in brokers:
+        if totals["totalEquity"] and item["hasData"]:
+            item["allocationPct"] = str(Decimal(item["totalEquity"]) / totals["totalEquity"] * 100)
+    return {"currency": currency, "complete": not missing, "missingBrokers": missing,
+            "brokerCount": 2 - len(missing), **{key: str(value) for key, value in totals.items()},
+            "overallPnl": str(totals["totalEquity"] - totals["netContributions"]), "brokers": brokers}
+
+
 @app.get("/api/positions")
 def positions(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "tiger"):
     store = database(broker)
@@ -205,10 +252,8 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
 @app.get("/api/sync/status")
 def status(broker: str = "tiger"):
     state = database(broker).one("SELECT last_success,last_error,components,cash_flow_last_success FROM sync_state WHERE id=1") or {}
-    stale_minutes = int(os.getenv("PORTFOLIO_STALE_MINUTES", os.getenv("TIGER_STALE_MINUTES", "60")))
     last = state.get("last_success")
-    stale = not last or (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() > stale_minutes * 60
-    return {"lastSuccess": last, "lastError": state.get("last_error"), "stale": stale, "mode": "live",
+    return {"lastSuccess": last, "lastError": state.get("last_error"), "stale": is_stale(last), "mode": "live",
             "broker": broker, "components": json.loads(state.get("components") or "{}"),
             "cashFlowLastSuccess": state.get("cash_flow_last_success")}
 
