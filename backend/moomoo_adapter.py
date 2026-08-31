@@ -1,4 +1,3 @@
-import math
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -19,7 +18,7 @@ CASH_FIELDS = {"SGD": "sg_cash", "USD": "us_cash", "HKD": "hk_cash", "CNH": "cn_
 def _number(value: Any, default: Decimal = Decimal()) -> Decimal:
     try:
         result = Decimal(str(value))
-        return result if math.isfinite(float(result)) else default
+        return result if result.is_finite() else default
     except Exception:
         return default
 
@@ -39,9 +38,12 @@ class MoomooAdapter:
 
     def __init__(self, client=None, sdk=None) -> None:
         self.components: dict[str, str] = {}
-        self.account = int(os.getenv("MOOMOO_ACCOUNT_ID", "0"))
-        if not self.account:
-            raise MoomooError("Moomoo requires MOOMOO_ACCOUNT_ID")
+        try:
+            self.account = int(os.getenv("MOOMOO_ACCOUNT_ID", ""))
+            if self.account <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise MoomooError("Moomoo requires a valid numeric MOOMOO_ACCOUNT_ID") from exc
         host = os.getenv("MOOMOO_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise MoomooError("Moomoo OpenD must use a localhost address")

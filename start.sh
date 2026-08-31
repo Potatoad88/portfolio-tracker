@@ -4,7 +4,7 @@ set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ ! -f "$PROJECT_DIR/.env" ]; then
-  echo "Missing .env. Copy .env.example and add your Tiger credentials."
+  echo "Missing .env. Copy .env.example and add your broker settings."
   exit 1
 fi
 

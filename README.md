@@ -159,12 +159,14 @@ The command backs up every broker database that exists into the ignored `backups
 ## Tests and build
 
 ```sh
-npm --prefix frontend run format
+npm --prefix frontend run format:check
 PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
 Tests cover financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
+
+GitHub Actions runs these checks on every push and pull request. Use `npm --prefix frontend run format` to apply frontend formatting locally.
 
 ## Troubleshooting
 

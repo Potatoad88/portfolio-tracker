@@ -278,6 +278,12 @@ class MoomooAdapterTests(unittest.TestCase):
             self.adapter(client).fetch()
         self.assertTrue(client.closed)
 
+    def test_invalid_account_id_has_clear_error(self):
+        for value in ("", "not-a-number", "-1"):
+            with patch.dict(os.environ, {"MOOMOO_ACCOUNT_ID": value}):
+                with self.assertRaisesRegex(MoomooError, "valid numeric"):
+                    MoomooAdapter(client=self.Client(), sdk=self.Sdk)
+
     def test_non_local_opend_is_rejected(self):
         with patch.dict(os.environ, {"MOOMOO_ACCOUNT_ID": "42", "MOOMOO_HOST": "example.com"}):
             with self.assertRaisesRegex(MoomooError, "localhost"):
