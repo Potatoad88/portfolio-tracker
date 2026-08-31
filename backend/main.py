@@ -70,16 +70,22 @@ def sync(broker: str = "tiger"):
         client = tiger_adapter() if broker == "tiger" else MoomooAdapter()
         latest = store.one("SELECT captured_at FROM history ORDER BY captured_at DESC LIMIT 1")
         cash_flow_dates: list[str] = []
+        cash_flow_checked_through = None
         if broker == "moomoo":
             latest_flow = store.one("SELECT max(business_date) value FROM funding_transactions")
             days = min(max(int(os.getenv("MOOMOO_CASH_FLOW_DAYS", "20")), 1), 20)
-            lookback = (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
-            history_start = max(latest_flow["value"], lookback) if latest_flow and latest_flow["value"] else lookback
+            today = datetime.now(timezone.utc).date()
+            state = store.one("SELECT cash_flow_checked_through FROM sync_state WHERE id=1") or {}
+            checkpoint = state.get("cash_flow_checked_through")
+            lookback = (today - timedelta(days=days - 1)).isoformat()
+            history_start = max((datetime.fromisoformat(checkpoint).date() + timedelta(days=1)).isoformat(), lookback) if checkpoint else (today.isoformat() if latest_flow and latest_flow["value"] else lookback)
+            history_start = min(history_start, today.isoformat())
             configured = {value.strip() for value in os.getenv("MOOMOO_CASH_FLOW_DATES", "").split(",") if value.strip()}
             stored = {row["business_date"] for row in store.rows("SELECT DISTINCT business_date FROM funding_transactions")}
             cash_flow_dates = sorted(configured - stored)
             if cash_flow_dates:
-                history_start = datetime.now(timezone.utc).date().isoformat()
+                history_start = today.isoformat()
+            cash_flow_checked_through = today.isoformat()
         else:
             history_start = (datetime.fromisoformat(latest["captured_at"]).date() - timedelta(days=1)).isoformat() if latest else "2015-01-01"
         snapshot, funding_rows, history_rows = client.fetch(history_start, cash_flow_dates) if broker == "moomoo" else client.fetch(history_start)
@@ -87,7 +93,7 @@ def sync(broker: str = "tiger"):
             net_contributions(funding_rows)
         if snapshot.reporting_currency != "SGD":
             raise ValueError("Unexpected snapshot currency; SGD required")
-        store.sync(snapshot, funding_rows, history_rows, client.components)
+        store.sync(snapshot, funding_rows, history_rows, client.components, cash_flow_checked_through)
         return {"ok": True, "broker": broker, "capturedAt": snapshot.captured_at.isoformat()}
     except (TigerError, MoomooError, ValueError) as exc:
         store.record_error(str(exc))
@@ -146,7 +152,15 @@ def funding(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     store = database(broker)
     snap = store.one("SELECT sgd_to_usd FROM portfolio_snapshots ORDER BY id DESC LIMIT 1") or {"sgd_to_usd": "1"}
     factor = currency_factor(currency, snap)
-    rows = store.rows("SELECT transaction_id,type,currency,amount,business_date,completed,direction,settlement_date,remark FROM funding_transactions ORDER BY business_date DESC")
+    if broker == "moomoo":
+        rows = [{"transaction_id": item.transaction_id, "type": item.type, "currency": item.currency,
+                 "amount": str(item.amount), "business_date": item.business_date.isoformat(),
+                 "completed": int(item.completed), "direction": item.direction,
+                 "settlement_date": item.settlement_date.isoformat() if item.settlement_date else None,
+                 "remark": item.remark} for item in contribution_items(store, broker) if item.type]
+        rows.sort(key=lambda row: row["business_date"], reverse=True)
+    else:
+        rows = store.rows("SELECT transaction_id,type,currency,amount,business_date,completed,direction,settlement_date,remark FROM funding_transactions ORDER BY business_date DESC")
     for row in rows:
         row["original_currency"] = row["currency"]
         row["display_currency"] = row["currency"] if broker == "moomoo" else currency
@@ -180,12 +194,13 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
 
 @app.get("/api/sync/status")
 def status(broker: str = "tiger"):
-    state = database(broker).one("SELECT last_success,last_error,components FROM sync_state WHERE id=1") or {}
+    state = database(broker).one("SELECT last_success,last_error,components,cash_flow_checked_through FROM sync_state WHERE id=1") or {}
     stale_minutes = int(os.getenv("PORTFOLIO_STALE_MINUTES", os.getenv("TIGER_STALE_MINUTES", "60")))
     last = state.get("last_success")
     stale = not last or (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() > stale_minutes * 60
     return {"lastSuccess": last, "lastError": state.get("last_error"), "stale": stale, "mode": "live",
-            "broker": broker, "components": json.loads(state.get("components") or "{}")}
+            "broker": broker, "components": json.loads(state.get("components") or "{}"),
+            "cashFlowCheckedThrough": state.get("cash_flow_checked_through")}
 
 
 @app.get("/api/export/{dataset}")

@@ -140,9 +140,12 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.db.one("SELECT count(*) n FROM portfolio_snapshots")["n"], 2)
 
     def test_sync_persists_fx_and_component_health(self):
-        self.db.sync(snapshot(), FUNDING, [HistoryPoint(datetime.now(timezone.utc), Decimal("100"), Decimal("0.75"))], {"assets": "ok"})
+        self.db.sync(snapshot(), FUNDING, [HistoryPoint(datetime.now(timezone.utc), Decimal("100"), Decimal("0.75"))],
+                     {"assets": "ok"}, "2026-08-31")
         self.assertEqual(self.db.one("SELECT sgd_to_usd FROM history")["sgd_to_usd"], "0.75")
-        self.assertIn('"assets": "ok"', self.db.one("SELECT components FROM sync_state WHERE id=1")["components"])
+        state = self.db.one("SELECT components,cash_flow_checked_through FROM sync_state WHERE id=1")
+        self.assertIn('"assets": "ok"', state["components"])
+        self.assertEqual(state["cash_flow_checked_through"], "2026-08-31")
 
     def test_legacy_schema_is_upgraded_without_losing_rows(self):
         handle, path = tempfile.mkstemp(suffix=".db")
@@ -318,14 +321,16 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(moomoo["supportsContributions"])
         self.assertEqual(moomoo["netContributions"], "0")
 
-    def test_moomoo_cash_flow_remains_raw_and_excluded_from_contributions(self):
-        flow = Funding("flow-1", "Fund Redemption", "USD", Decimal("12.5"), date(2026, 1, 2), True,
-                       "IN", date(2026, 1, 3), "Provider remark")
-        main.moomoo_db.sync(replace(snapshot(), positions=()), [flow], [])
-        row = main.funding("SGD", "moomoo")[0]
-        self.assertEqual((row["amount"], row["display_currency"], row["direction"], row["remark"]),
-                         ("12.5", "USD", "IN", "Provider remark"))
-        self.assertEqual(main.summary("SGD", "moomoo")["netContributions"], "0")
+    def test_moomoo_funding_hides_non_contribution_cash_flows(self):
+        flows = [Funding("fund", "Fund Redemption", "USD", Decimal("12.5"), date(2026, 1, 2), True, "IN"),
+                 Funding("deposit", "Others", "SGD", Decimal("500"), date(2026, 1, 3), True,
+                         "IN", remark="DDIIRGPC123")]
+        main.moomoo_db.sync(replace(snapshot(), positions=()), flows, [])
+        rows = main.funding("SGD", "moomoo")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["type_label"], rows[0]["amount"], rows[0]["display_currency"]),
+                         ("Deposit", "500", "SGD"))
+        self.assertEqual(main.summary("SGD", "moomoo")["netContributions"], "500")
 
     def test_moomoo_contributions_include_only_verified_transfers(self):
         flows = [

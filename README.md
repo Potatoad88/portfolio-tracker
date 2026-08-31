@@ -90,9 +90,9 @@ Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be 
 - Reads OpenD's position cache and account assets in the currencies needed to normalize values to SGD; no quote API is used.
 - Shows current total equity, cash, holdings, listed-position unrealized P&L, and an aggregate fund-assets row when Moomoo reports funds outside its position list.
 - Builds equity history locally from changed snapshots beginning with the first successful sync.
-- Shows raw cash-flow records, including Moomoo's type, direction, original currency, amount, and remark.
+- Stores raw cash-flow records locally for auditability, while the dashboard and funding CSV show only verified deposits and withdrawals.
 - Contribution P&L includes only SGD DDI-tagged deposits, explicit `Bank Transfer Withdrawals`, and locally confirmed `date:amount` entries in `MOOMOO_MANUAL_WITHDRAWALS`. Fund activity, trades, conversions, dividends, interest, and every other cash flow remain excluded.
-- The first sync fetches the most recent `MOOMOO_CASH_FLOW_DAYS` calendar days (maximum 20); later syncs resume from the latest stored clearing date and deduplicate by Moomoo cash-flow ID.
+- The first sync fetches the most recent `MOOMOO_CASH_FLOW_DAYS` calendar days (maximum 20). A successful sync records `cash_flow_checked_through`; later syncs request only unchecked dates, or today when already current, and deduplicate by Moomoo cash-flow ID.
 - Optional comma-separated `MOOMOO_CASH_FLOW_DATES` backfills known clearing dates. Dates already present in the local database are skipped, and no refresh may query more than 20 dates.
 
 Moomoo documents a limit of 10 account-funds requests and 10 position requests per 30 seconds per account, but applies those limits only when `refresh_cache=True`. This tracker always uses `refresh_cache=False`, so refreshes read OpenD's locally synchronized cache. Cash flow is limited separately to 20 daily requests per 30 seconds, which is why the initial lookback is capped at 20 days. See the official [account-funds](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-funds.html), [positions](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-position-list.html), and [cash-flow](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-acc-cash-flow.html) documentation.
@@ -149,7 +149,7 @@ Adapters are the trust boundaries for broker response formats. Tiger uses `backe
 
 ## Export and backup
 
-Dashboard exports use only the selected broker's local database. Moomoo's funding export contains raw cash-flow records and does not classify them as contributions.
+Dashboard exports use only the selected broker's local database. Moomoo's funding export contains only the verified deposits and withdrawals used for contribution calculations.
 
 ```sh
 ./backup.sh

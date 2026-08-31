@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS positions (
  average_cost TEXT NOT NULL, market_price TEXT NOT NULL, market_value TEXT NOT NULL, unrealized_pnl TEXT NOT NULL,
  asset_type TEXT NOT NULL DEFAULT 'STK');
 CREATE TABLE IF NOT EXISTS history (captured_at TEXT PRIMARY KEY, total_equity TEXT NOT NULL, sgd_to_usd TEXT NOT NULL DEFAULT '1');
-CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT, last_error TEXT, components TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT, last_error TEXT,
+ components TEXT NOT NULL DEFAULT '{}', cash_flow_checked_through TEXT);
 INSERT OR IGNORE INTO sync_state(id) VALUES(1);
 """
 
@@ -46,6 +47,8 @@ class Database:
             state_columns = {row[1] for row in db.execute("PRAGMA table_info(sync_state)")}
             if "components" not in state_columns:
                 db.execute("ALTER TABLE sync_state ADD COLUMN components TEXT NOT NULL DEFAULT '{}'")
+            if "cash_flow_checked_through" not in state_columns:
+                db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_checked_through TEXT")
             funding_columns = {row[1] for row in db.execute("PRAGMA table_info(funding_transactions)")}
             for column, definition in (("direction", "TEXT NOT NULL DEFAULT ''"),
                                        ("settlement_date", "TEXT"),
@@ -67,7 +70,8 @@ class Database:
         finally:
             db.close()
 
-    def sync(self, snapshot: Snapshot, funding: list[Funding], history: list[HistoryPoint], components: dict[str, str] | None = None) -> None:
+    def sync(self, snapshot: Snapshot, funding: list[Funding], history: list[HistoryPoint], components: dict[str, str] | None = None,
+             cash_flow_checked_through: str | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as db:
             for f in funding:
@@ -86,7 +90,9 @@ class Database:
                                (cur.lastrowid, p.symbol, p.name, p.market, p.currency, str(p.quantity), str(p.average_cost), str(p.market_price), str(p.market_value), str(p.unrealized_pnl), p.asset_type))
             for h in history:
                 db.execute("INSERT INTO history(captured_at,total_equity,sgd_to_usd) VALUES(?,?,?) ON CONFLICT(captured_at) DO UPDATE SET total_equity=excluded.total_equity,sgd_to_usd=excluded.sgd_to_usd", (h.captured_at.isoformat(), str(h.total_equity), str(h.sgd_to_usd)))
-            db.execute("UPDATE sync_state SET last_success=?,last_error=NULL,components=? WHERE id=1", (now, json.dumps(components or {})))
+            db.execute("""UPDATE sync_state SET last_success=?,last_error=NULL,components=?,
+                       cash_flow_checked_through=COALESCE(?,cash_flow_checked_through) WHERE id=1""",
+                       (now, json.dumps(components or {}), cash_flow_checked_through))
 
     @staticmethod
     def _snapshot_changed(db: sqlite3.Connection, snapshot: Snapshot) -> bool:
