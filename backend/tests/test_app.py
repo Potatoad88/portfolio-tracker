@@ -236,33 +236,38 @@ class MoomooAdapterTests(unittest.TestCase):
 
     def test_mixed_currency_positions_and_aggregate_fund(self):
         client = self.Client()
-        result, funding_rows, history_rows = self.adapter(client).fetch(date.today().isoformat())
+        result, funding_rows, history_rows = self.adapter(client).fetch()
         self.assertEqual((result.total_equity, result.cash, result.holdings_value),
                          (Decimal("1000"), Decimal("225.00"), Decimal("775.00")))
         self.assertEqual(result.sgd_to_usd, Decimal("0.8"))
         self.assertEqual(result.unrealized_pnl, Decimal("17.50"))
         self.assertEqual(result.positions[0].market_value, Decimal("500.0"))
         self.assertEqual(result.positions[-1].asset_type, "FUND")
-        self.assertEqual(history_rows, [])
-        self.assertEqual((funding_rows[0].type, funding_rows[0].direction, funding_rows[0].remark),
-                         ("Fund Redemption", "IN", "Raw provider description"))
-        self.assertEqual(funding_rows[0].amount, Decimal("12.5"))
+        self.assertEqual((funding_rows, history_rows), ([], []))
         self.assertTrue(client.closed)
 
     def test_explicit_cash_flow_dates_are_queried_once(self):
         client = self.Client()
-        self.adapter(client).fetch(date.today().isoformat(), ["2024-03-26", "2024-03-26"])
+        self.adapter(client).fetch_cash_flows([date(2024, 3, 26), date.today()])
         self.assertEqual(client.cash_flow_dates, ["2024-03-26", date.today().isoformat()])
+        self.assertTrue(client.closed)
 
-    def test_cash_flow_end_limits_the_queried_range(self):
+    def test_portfolio_fetch_does_not_query_cash_flow(self):
         client = self.Client()
-        self.adapter(client).fetch("2026-01-01", history_end="2026-01-02")
-        self.assertEqual(client.cash_flow_dates, ["2026-01-01", "2026-01-02"])
+        self.adapter(client).fetch()
+        self.assertEqual(client.cash_flow_dates, [])
 
     def test_query_failure_closes_context_and_preserves_safe_message(self):
         client = self.Client(fail_positions=True)
         with self.assertRaisesRegex(MoomooError, "OpenD unavailable"):
-            self.adapter(client).fetch(date.today().isoformat())
+            self.adapter(client).fetch()
+        self.assertTrue(client.closed)
+
+    def test_cash_flow_failure_closes_context(self):
+        client = self.Client()
+        client.get_acc_cash_flow = lambda **kwargs: (-1, "OpenD unavailable")
+        with self.assertRaisesRegex(MoomooError, "OpenD unavailable"):
+            self.adapter(client).fetch_cash_flows([date.today()])
         self.assertTrue(client.closed)
 
     def test_invalid_required_number_has_moomoo_error(self):
@@ -270,7 +275,7 @@ class MoomooAdapterTests(unittest.TestCase):
         original = client.accinfo_query
         client.accinfo_query = lambda currency, **kwargs: (0, [{"total_assets": "NaN"}]) if currency == "SGD" else original(currency, **kwargs)
         with self.assertRaisesRegex(MoomooError, "Moomoo returned an invalid total assets"):
-            self.adapter(client).fetch(date.today().isoformat())
+            self.adapter(client).fetch()
         self.assertTrue(client.closed)
 
     def test_non_local_opend_is_rejected(self):
@@ -358,26 +363,75 @@ class EndpointTests(unittest.TestCase):
             result = main.summary("SGD", "moomoo")
         self.assertEqual(result["netContributions"], "350")
 
-    def test_moomoo_sync_advances_old_checkpoint_by_twenty_days(self):
-        start = date.today() - timedelta(days=30)
-        with main.moomoo_db.connect() as db:
-            db.execute("UPDATE sync_state SET cash_flow_checked_through=? WHERE id=1", (start.isoformat(),))
+    def test_moomoo_portfolio_sync_does_not_fetch_cash_flow(self):
         calls = []
 
         class Client:
-            components = {"cash_flow": "ok"}
+            components = {"positions": "ok"}
 
             def fetch(self, *args):
                 calls.append(args)
                 return replace(snapshot(), positions=()), [], []
 
-        with patch.dict(os.environ, {"MOOMOO_CASH_FLOW_DATES": ""}), patch.object(main, "MoomooAdapter", return_value=Client()):
+        with patch.object(main, "MoomooAdapter", return_value=Client()):
             main.sync("moomoo")
-        expected_start = start + timedelta(days=1)
-        expected_end = expected_start + timedelta(days=19)
-        self.assertEqual(calls[0], (expected_start.isoformat(), [], expected_end.isoformat()))
-        self.assertEqual(main.moomoo_db.one("SELECT cash_flow_checked_through FROM sync_state WHERE id=1")["cash_flow_checked_through"],
-                         expected_end.isoformat())
+        self.assertEqual(calls, [()])
+
+    def test_cash_flow_sync_validates_dates(self):
+        invalid = [main.CashFlowRequest(dates=[]),
+                   main.CashFlowRequest(dates=[date.today()] * 2),
+                   main.CashFlowRequest(dates=[date.today() + timedelta(days=1)]),
+                   main.CashFlowRequest(dates=[date.today() - timedelta(days=value) for value in range(21)])]
+        for request in invalid:
+            with self.assertRaises(main.HTTPException):
+                main.sync_cash_flow(request)
+        with self.assertRaises(Exception):
+            main.CashFlowRequest(dates=["not-a-date"])
+        with self.assertRaises(main.HTTPException):
+            main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]), "tiger")
+
+    def test_cash_flow_sync_stores_raw_rows_and_counts_verified(self):
+        selected = [date(2026, 1, 3), date(2026, 1, 1)]
+        flows = [Funding("deposit", "Others", "SGD", Decimal("500"), date(2026, 1, 1), True, "IN", remark="DDIIRGPC123"),
+                 Funding("fund", "Fund Redemption", "SGD", Decimal("20"), date(2026, 1, 3), True, "IN")]
+        calls = []
+
+        class Client:
+            def fetch_cash_flows(self, dates):
+                calls.append(dates)
+                return flows
+
+        with patch.object(main, "MoomooAdapter", return_value=Client()):
+            result = main.sync_cash_flow(main.CashFlowRequest(dates=selected))
+            main.sync_cash_flow(main.CashFlowRequest(dates=selected))
+        self.assertEqual(calls[0], sorted(selected))
+        self.assertEqual((result["rawCount"], result["verifiedCount"]), (2, 1))
+        self.assertEqual(len(main.moomoo_db.rows("SELECT * FROM funding_transactions")), 2)
+        self.assertEqual(len(main.funding("SGD", "moomoo")), 1)
+        self.assertIsNotNone(main.status("moomoo")["cashFlowLastSuccess"])
+
+    def test_cash_flow_failure_preserves_existing_rows(self):
+        main.moomoo_db.sync_cash_flows([Funding("existing", "Others", "SGD", Decimal("1"), date.today(), True, "IN")])
+        before = main.moomoo_db.one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"]
+
+        class Client:
+            def fetch_cash_flows(self, dates):
+                raise MoomooError("OpenD unavailable")
+
+        with patch.object(main, "MoomooAdapter", return_value=Client()), self.assertRaises(main.HTTPException):
+            main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]))
+        self.assertEqual(len(main.moomoo_db.rows("SELECT * FROM funding_transactions")), 1)
+        self.assertEqual(main.moomoo_db.one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"], before)
+
+    def test_empty_cash_flow_sync_updates_timestamp(self):
+        class Client:
+            def fetch_cash_flows(self, dates):
+                return []
+
+        with patch.object(main, "MoomooAdapter", return_value=Client()):
+            result = main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]))
+        self.assertEqual((result["rawCount"], result["verifiedCount"]), (0, 0))
+        self.assertIsNotNone(main.status("moomoo")["cashFlowLastSuccess"])
 
     def test_invalid_broker_is_rejected(self):
         with self.assertRaisesRegex(main.HTTPException, "Broker must be"):

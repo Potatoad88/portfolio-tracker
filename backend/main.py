@@ -8,6 +8,7 @@ from decimal import Decimal
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from adapter import TigerError, adapter as tiger_adapter
 from calculations import net_contributions, performance
@@ -46,10 +47,7 @@ def funding_items(store: Database) -> list[Funding]:
             for row in store.rows("SELECT * FROM funding_transactions")]
 
 
-def contribution_items(store: Database, broker: str) -> list[Funding]:
-    items = funding_items(store)
-    if broker == "tiger":
-        return items
+def moomoo_contributions(items: list[Funding]) -> list[Funding]:
     manual = {value.strip() for value in os.getenv("MOOMOO_MANUAL_WITHDRAWALS", "").split(",") if value.strip()}
     result = []
     for item in items:
@@ -63,40 +61,24 @@ def contribution_items(store: Database, broker: str) -> list[Funding]:
     return result
 
 
+def contribution_items(store: Database, broker: str) -> list[Funding]:
+    items = funding_items(store)
+    return items if broker == "tiger" else moomoo_contributions(items)
+
+
 @app.post("/api/sync")
 def sync(broker: str = "tiger"):
     store = database(broker)
     try:
         latest = store.one("SELECT captured_at FROM history ORDER BY captured_at DESC LIMIT 1")
-        cash_flow_dates: list[str] = []
-        cash_flow_checked_through = None
-        cash_flow_end = ""
-        if broker == "moomoo":
-            latest_flow = store.one("SELECT max(business_date) value FROM funding_transactions")
-            days = min(max(int(os.getenv("MOOMOO_CASH_FLOW_DAYS", "20")), 1), 20)
-            today = date.today()
-            state = store.one("SELECT cash_flow_checked_through FROM sync_state WHERE id=1") or {}
-            checkpoint = state.get("cash_flow_checked_through")
-            lookback = (today - timedelta(days=days - 1)).isoformat()
-            history_start = (date.fromisoformat(checkpoint) + timedelta(days=1)).isoformat() if checkpoint else (today.isoformat() if latest_flow and latest_flow["value"] else lookback)
-            history_start = min(history_start, today.isoformat())
-            cash_flow_end = min(date.fromisoformat(history_start) + timedelta(days=19), today).isoformat()
-            configured = {value.strip() for value in os.getenv("MOOMOO_CASH_FLOW_DATES", "").split(",") if value.strip()}
-            stored = {row["business_date"] for row in store.rows("SELECT DISTINCT business_date FROM funding_transactions")}
-            cash_flow_dates = sorted(configured - stored)
-            if cash_flow_dates:
-                history_start = today.isoformat()
-                cash_flow_end = today.isoformat()
-            cash_flow_checked_through = cash_flow_end
-        else:
-            history_start = (datetime.fromisoformat(latest["captured_at"]).date() - timedelta(days=1)).isoformat() if latest else "2015-01-01"
+        history_start = (datetime.fromisoformat(latest["captured_at"]).date() - timedelta(days=1)).isoformat() if latest else "2015-01-01"
         client = tiger_adapter() if broker == "tiger" else MoomooAdapter()
-        snapshot, funding_rows, history_rows = client.fetch(history_start, cash_flow_dates, cash_flow_end) if broker == "moomoo" else client.fetch(history_start)
+        snapshot, funding_rows, history_rows = client.fetch() if broker == "moomoo" else client.fetch(history_start)
         if broker == "tiger":
             net_contributions(funding_rows)
         if snapshot.reporting_currency != "SGD":
             raise ValueError("Unexpected snapshot currency; SGD required")
-        store.sync(snapshot, funding_rows, history_rows, client.components, cash_flow_checked_through)
+        store.sync(snapshot, funding_rows, history_rows, client.components)
         return {"ok": True, "broker": broker, "capturedAt": snapshot.captured_at.isoformat()}
     except (TigerError, MoomooError, ValueError) as exc:
         store.record_error(str(exc))
@@ -104,6 +86,31 @@ def sync(broker: str = "tiger"):
     except Exception as exc:
         store.record_error("Sync failed; previous data was preserved")
         raise HTTPException(status_code=500, detail="Sync failed; previous data was preserved") from exc
+
+
+class CashFlowRequest(BaseModel):
+    dates: list[date]
+
+
+@app.post("/api/cash-flow/sync")
+def sync_cash_flow(request: CashFlowRequest, broker: str = "moomoo"):
+    if broker != "moomoo":
+        raise HTTPException(422, "Cash-flow sync is available only for Moomoo")
+    if not request.dates:
+        raise HTTPException(422, "Select at least one cash-flow date")
+    if len(request.dates) > 20:
+        raise HTTPException(422, "Select no more than 20 cash-flow dates")
+    if len(set(request.dates)) != len(request.dates):
+        raise HTTPException(422, "Cash-flow dates must be unique")
+    if any(value > date.today() for value in request.dates):
+        raise HTTPException(422, "Cash-flow dates cannot be in the future")
+    try:
+        rows = MoomooAdapter().fetch_cash_flows(sorted(request.dates))
+        synced_at = moomoo_db.sync_cash_flows(rows)
+        verified = sum(1 for item in moomoo_contributions(rows) if item.type)
+        return {"ok": True, "rawCount": len(rows), "verifiedCount": verified, "syncedAt": synced_at}
+    except MoomooError as exc:
+        raise HTTPException(502, detail=str(exc)) from exc
 
 
 @app.get("/api/summary")
@@ -197,13 +204,13 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
 
 @app.get("/api/sync/status")
 def status(broker: str = "tiger"):
-    state = database(broker).one("SELECT last_success,last_error,components,cash_flow_checked_through FROM sync_state WHERE id=1") or {}
+    state = database(broker).one("SELECT last_success,last_error,components,cash_flow_last_success FROM sync_state WHERE id=1") or {}
     stale_minutes = int(os.getenv("PORTFOLIO_STALE_MINUTES", os.getenv("TIGER_STALE_MINUTES", "60")))
     last = state.get("last_success")
     stale = not last or (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() > stale_minutes * 60
     return {"lastSuccess": last, "lastError": state.get("last_error"), "stale": stale, "mode": "live",
             "broker": broker, "components": json.loads(state.get("components") or "{}"),
-            "cashFlowCheckedThrough": state.get("cash_flow_checked_through")}
+            "cashFlowLastSuccess": state.get("cash_flow_last_success")}
 
 
 @app.get("/api/export/{dataset}")

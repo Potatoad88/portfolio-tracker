@@ -49,8 +49,6 @@ MOOMOO_HOST=127.0.0.1
 MOOMOO_PORT=11111
 MOOMOO_ACCOUNT_ID=your_real_sg_account_id
 MOOMOO_DB_PATH=backend/moomoo.db
-MOOMOO_CASH_FLOW_DAYS=20
-MOOMOO_CASH_FLOW_DATES=
 MOOMOO_MANUAL_WITHDRAWALS=
 ```
 
@@ -72,7 +70,7 @@ Start and log in to OpenD first if you intend to refresh Moomoo. Then run:
 ./start.sh
 ```
 
-Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact either broker.
+Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact either broker. On the Moomoo tab, use **Fetch cash flow** under Deposits & withdrawals and add up to 20 known transaction dates; ordinary Refresh does not fetch cash flow.
 
 Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be closed separately.
 
@@ -92,10 +90,10 @@ Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be 
 - Builds equity history locally from changed snapshots beginning with the first successful sync.
 - Stores raw cash-flow records locally for auditability, while the dashboard and funding CSV show only verified deposits and withdrawals.
 - Contribution P&L includes only SGD DDI-tagged deposits, explicit `Bank Transfer Withdrawals`, and locally confirmed `date:amount` entries in `MOOMOO_MANUAL_WITHDRAWALS`. Fund activity, trades, conversions, dividends, interest, and every other cash flow remain excluded.
-- The first sync fetches the most recent `MOOMOO_CASH_FLOW_DAYS` calendar days (maximum 20). A successful sync records `cash_flow_checked_through`; later syncs advance through unchecked dates in contiguous batches of at most 20, or recheck today when current, and deduplicate by Moomoo cash-flow ID.
-- Optional comma-separated `MOOMOO_CASH_FLOW_DATES` backfills known clearing dates. Dates already present in the local database are skipped, and no refresh may query more than 20 dates.
+- Normal Moomoo Refresh updates portfolio assets and positions only; it does not request cash flow.
+- **Fetch cash flow** accepts up to 20 known clearing dates, queries each date once, records the last successful cash-flow sync, and deduplicates returned rows by Moomoo cash-flow ID.
 
-Moomoo documents a limit of 10 account-funds requests and 10 position requests per 30 seconds per account, but applies those limits only when `refresh_cache=True`. This tracker always uses `refresh_cache=False`, so refreshes read OpenD's locally synchronized cache. Cash flow is limited separately to 20 daily requests per 30 seconds, which is why the initial lookback is capped at 20 days. See the official [account-funds](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-funds.html), [positions](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-position-list.html), and [cash-flow](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-acc-cash-flow.html) documentation.
+Moomoo documents a limit of 10 account-funds requests and 10 position requests per 30 seconds per account, but applies those limits only when `refresh_cache=True`. This tracker always uses `refresh_cache=False`, so refreshes read OpenD's locally synchronized cache. Cash flow is limited separately to 20 daily requests per 30 seconds, so each explicit cash-flow fetch accepts at most 20 selected dates. See the official [account-funds](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-funds.html), [positions](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-position-list.html), and [cash-flow](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-acc-cash-flow.html) documentation.
 
 ## Calculations
 
@@ -118,7 +116,8 @@ Every endpoint accepts `broker=tiger|moomoo`; omitting it preserves the original
 
 | Method | Path | Purpose | Broker request |
 | --- | --- | --- | --- |
-| `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store selected broker data | Yes |
+| `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store current portfolio data | Yes |
+| `POST` | `/api/cash-flow/sync?broker=moomoo` | Fetch up to 20 explicitly selected cash-flow dates | Yes |
 | `GET` | `/api/summary?currency=SGD&broker=moomoo` | Summary and capabilities | No |
 | `GET` | `/api/positions?currency=SGD&broker=moomoo` | Latest positions | No |
 | `GET` | `/api/funding?currency=SGD&broker=tiger` | Tiger funding history | No |

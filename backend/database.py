@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS positions (
  asset_type TEXT NOT NULL DEFAULT 'STK');
 CREATE TABLE IF NOT EXISTS history (captured_at TEXT PRIMARY KEY, total_equity TEXT NOT NULL, sgd_to_usd TEXT NOT NULL DEFAULT '1');
 CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT, last_error TEXT,
- components TEXT NOT NULL DEFAULT '{}', cash_flow_checked_through TEXT);
+ components TEXT NOT NULL DEFAULT '{}', cash_flow_checked_through TEXT, cash_flow_last_success TEXT);
 INSERT OR IGNORE INTO sync_state(id) VALUES(1);
 """
 
@@ -49,6 +49,8 @@ class Database:
                 db.execute("ALTER TABLE sync_state ADD COLUMN components TEXT NOT NULL DEFAULT '{}'")
             if "cash_flow_checked_through" not in state_columns:
                 db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_checked_through TEXT")
+            if "cash_flow_last_success" not in state_columns:
+                db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_last_success TEXT")
             db.execute("""UPDATE sync_state SET cash_flow_checked_through=substr(last_success,1,10)
                        WHERE cash_flow_checked_through IS NULL AND last_success IS NOT NULL""")
             funding_columns = {row[1] for row in db.execute("PRAGMA table_info(funding_transactions)")}
@@ -115,6 +117,21 @@ class Database:
     def record_error(self, message: str) -> None:
         with self.connect() as db:
             db.execute("UPDATE sync_state SET last_error=? WHERE id=1", (message,))
+
+    def sync_cash_flows(self, funding: list[Funding]) -> str:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            for item in funding:
+                db.execute("""INSERT INTO funding_transactions(transaction_id,type,currency,amount,business_date,completed,created_at,updated_at,direction,settlement_date,remark)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(transaction_id) DO UPDATE SET type=excluded.type,currency=excluded.currency,amount=excluded.amount,
+                    business_date=excluded.business_date,completed=excluded.completed,updated_at=excluded.updated_at,
+                    direction=excluded.direction,settlement_date=excluded.settlement_date,remark=excluded.remark""",
+                    (item.transaction_id, item.type, item.currency, str(item.amount), item.business_date.isoformat(),
+                     int(item.completed), now, now, item.direction,
+                     item.settlement_date.isoformat() if item.settlement_date else None, item.remark))
+            db.execute("UPDATE sync_state SET cash_flow_last_success=? WHERE id=1", (now,))
+        return now
 
     def rows(self, sql: str, params=()):
         with self.connect() as db:

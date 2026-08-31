@@ -1,6 +1,6 @@
 import math
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -75,11 +75,15 @@ class MoomooAdapter:
             raise MoomooError(f"Moomoo returned no {currency} account assets")
         return rows[0]
 
-    def fetch(self, history_start: str = "", extra_cash_flow_dates: list[str] | None = None, history_end: str = ""):
+    def _verify_account(self) -> None:
+        accounts = self._query("account", self.client.get_acc_list)
+        if not any(int(_value(row, "acc_id", default=0)) == self.account and
+                   str(_value(row, "trd_env", default="")).upper().endswith("REAL") for row in accounts):
+            raise MoomooError("MOOMOO_ACCOUNT_ID is not a real account available in OpenD")
+
+    def fetch(self):
         try:
-            accounts = self._query("account", self.client.get_acc_list)
-            if not any(int(_value(row, "acc_id", default=0)) == self.account and str(_value(row, "trd_env", default="")).upper().endswith("REAL") for row in accounts):
-                raise MoomooError("MOOMOO_ACCOUNT_ID is not a real account available in OpenD")
+            self._verify_account()
             raw_positions = self._query("positions", lambda: self.client.position_list_query(
                 trd_env=self.sdk.TrdEnv.REAL, acc_id=self.account, refresh_cache=False))
             sgd_assets = self._funds("SGD")
@@ -106,22 +110,23 @@ class MoomooAdapter:
             snapshot = Snapshot(datetime.now(timezone.utc), "SGD", total, cash, total - cash,
                                 sum((position.unrealized_pnl for position in positions), Decimal()), Decimal(),
                                 positions, Decimal("1") if total == 0 else usd_total / total)
+            return snapshot, [], []
+        finally:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+
+    def fetch_cash_flows(self, dates: list[date]) -> list[Funding]:
+        try:
+            self._verify_account()
             flows = []
-            current = date.fromisoformat(history_start) if history_start else date.today()
-            end = date.fromisoformat(history_end) if history_end else date.today()
-            dates = set(extra_cash_flow_dates or [])
-            while current <= end:
-                dates.add(current.isoformat())
-                current += timedelta(days=1)
-            if len(dates) > 20:
-                raise MoomooError("Moomoo cash-flow refresh is limited to 20 dates at a time")
-            for value in sorted(dates):
-                day = date.fromisoformat(value)
+            for day in dates:
                 rows = self._query("cash_flow", lambda day=day: self.client.get_acc_cash_flow(
                     clearing_date=day.isoformat(), trd_env=self.sdk.TrdEnv.REAL, acc_id=self.account,
                     cashflow_direction=self.sdk.CashFlowDirection.NONE))
                 flows.extend(self._cash_flow(row) for row in rows)
-            return snapshot, flows, []
+            return flows
         finally:
             try:
                 self.client.close()
