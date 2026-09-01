@@ -5,6 +5,7 @@ from typing import Callable
 
 from adapter import TigerError, adapter as tiger_adapter
 from ibkr_adapter import IBKRAdapter, IBKRError
+from ibkr_flex import IBKRFlexClient, IBKRFlexError
 from models import Funding
 from moomoo_adapter import MoomooAdapter, MoomooError
 
@@ -15,6 +16,7 @@ class BrokerCapabilities:
     performance_history: bool = True
     funding_history: bool = True
     cash_flow_sync: bool = False
+    cash_flow_range_sync: bool = False
     exports: bool = True
 
     def public(self) -> dict[str, bool]:
@@ -23,6 +25,7 @@ class BrokerCapabilities:
             "performanceHistory": self.performance_history,
             "fundingHistory": self.funding_history,
             "cashFlowSync": self.cash_flow_sync,
+            "cashFlowRangeSync": self.cash_flow_range_sync,
             "exports": self.exports,
         }
 
@@ -41,7 +44,9 @@ class BrokerDefinition:
     validates_funding: bool = False
     convert_funding_currency: bool = False
     display_filtered_contributions: bool = False
+    contributions_require_cash_flow_sync: bool = False
     contribution_filter: Callable[[list[Funding]], list[Funding]] = lambda items: items
+    cash_flow_factory: Callable[[], object] | None = None
 
     @property
     def configured(self) -> bool:
@@ -88,9 +93,10 @@ BROKERS = {
     "ibkr": BrokerDefinition(
         id="ibkr", display_name="IBKR", database_env="IBKR_DB_PATH",
         database_default="backend/ibkr.db", required_env=("IBKR_GATEWAY_URL",),
-        adapter_factory=IBKRAdapter, errors=(IBKRError,),
-        capabilities=BrokerCapabilities(contributions=False, performance_history=False,
-                                        funding_history=False),
+        adapter_factory=IBKRAdapter, errors=(IBKRError, IBKRFlexError),
+        cash_flow_factory=IBKRFlexClient,
+        capabilities=BrokerCapabilities(cash_flow_sync=True, cash_flow_range_sync=True),
+        convert_funding_currency=True, contributions_require_cash_flow_sync=True,
     ),
 }
 

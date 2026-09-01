@@ -186,9 +186,13 @@ class IBKRIntegrationTests(unittest.TestCase):
             self.assertEqual(result["missingContributionBrokers"], ["ibkr"])
             self.assertEqual(result["totalEquity"], "50")
 
-    def test_ibkr_funding_export_is_unavailable(self):
-        with self.assertRaisesRegex(main.HTTPException, "positions, history"):
-            main.export_csv("funding", "SGD", "ibkr")
+    def test_ibkr_funding_export_is_available(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as file:
+            store = Database(file.name)
+            store.sync(snapshot(), [], [])
+            with patch.dict(main.DATABASES, {"ibkr": store}):
+                response = main.export_csv("funding", "SGD", "ibkr")
+            self.assertIn("ibkr-funding-sgd.csv", response.headers["content-disposition"])
 
 
 if __name__ == "__main__":

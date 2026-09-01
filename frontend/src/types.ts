@@ -7,6 +7,7 @@ export type BrokerCapabilities = {
   performanceHistory: boolean;
   fundingHistory: boolean;
   cashFlowSync: boolean;
+  cashFlowRangeSync: boolean;
   exports: boolean;
 };
 export type BrokerMetadata = {
@@ -92,4 +93,5 @@ export type Status = {
   stale: boolean;
   components: Record<string, string>;
   cashFlowLastSuccess: string | null;
+  cashFlowCompleteSince: string | null;
 };

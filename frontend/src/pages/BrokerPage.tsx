@@ -133,7 +133,9 @@ export default function BrokerPage({
           value: money(summary?.netContributions, currency),
           info: !metadata.capabilities.cashFlowSync
             ? "Completed deposits − withdrawals − withdrawal fees + applicable refunds."
-            : "Verified SGD DDI deposits − bank withdrawals. All other cash flows are excluded.",
+            : metadata.capabilities.cashFlowRangeSync
+              ? "IBKR Flex deposits − withdrawals. Dividends, trades, interest, and fees are excluded."
+              : "Verified SGD DDI deposits − bank withdrawals. All other cash flows are excluded.",
         },
         {
           label: "Overall P&L",
@@ -577,6 +579,13 @@ export default function BrokerPage({
                     variant="outlined"
                   />
                 )}
+              {status?.cashFlowCompleteSince && (
+                <Chip
+                  label={`contribution history from: ${new Date(`${status.cashFlowCompleteSince}T00:00:00`).toLocaleDateString()}`}
+                  color="success"
+                  variant="outlined"
+                />
+              )}
               {!Object.keys(status?.components || {}).length && (
                 <Typography color="text.secondary">
                   Run a fresh sync to record component health.
@@ -589,6 +598,8 @@ export default function BrokerPage({
       <CashFlowDialog
         broker={broker}
         open={cashFlowOpen}
+        rangeSync={metadata.capabilities.cashFlowRangeSync}
+        coverageStart={status?.cashFlowCompleteSince || null}
         onClose={() => setCashFlowOpen(false)}
         onError={setError}
         onComplete={(message) => {

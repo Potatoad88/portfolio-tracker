@@ -97,7 +97,7 @@ export default function HomePage({
               {overview.missingContributionBrokers.length
                 ? ` for ${overview.missingContributionBrokers.map(title).join(" and ")}`
                 : ""}
-              . IBKR deposits and withdrawals are not connected.
+              .
             </Alert>
           )}
           <Box>
@@ -147,7 +147,7 @@ export default function HomePage({
                         : Number(overview.overallPnl),
                     info: overview.pnlComplete
                       ? "Combined total equity − combined net contributions."
-                      : "Unavailable until every represented broker has contribution history. IBKR deposits and withdrawals are not connected.",
+                      : "Unavailable until every represented broker has complete contribution history.",
                   },
                   { label: "Cash", value: money(overview.cash, currency) },
                   {

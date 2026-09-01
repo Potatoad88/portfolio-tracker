@@ -13,7 +13,7 @@ The browser talks only to the local FastAPI backend. Tiger credentials remain in
 - SGD/USD display, interactive local history, collapsible holdings, reconciliation warnings, CSV export, and SQLite backups.
 - Atomic syncs that preserve the previous broker snapshot when an upstream request fails.
 
-The application has no order, trade-unlock, deal, quote, transfer, statement, Flex, or streaming code and binds only to localhost.
+The application has no order, trade-unlock, deal, quote, transfer, brokerage-statement, or streaming code and binds only to localhost. IBKR Flex is used only for an explicitly requested read-only Statement of Funds import.
 
 ## API cost boundary
 
@@ -61,6 +61,8 @@ IBKR_GATEWAY_URL=https://localhost:5000/v1/api
 IBKR_ACCOUNT_ID=
 IBKR_DB_PATH=backend/ibkr.db
 IBKR_VERIFY_SSL=false
+IBKR_FLEX_QUERY_ID=
+IBKR_FLEX_TOKEN=
 ```
 
 Keep the Tiger PEM outside the repository if practical. `.env`, PEM/key formats, databases, and backups are ignored by Git.
@@ -83,6 +85,14 @@ Keep the Tiger PEM outside the repository if practical. `.env`, PEM/key formats,
 
 `IBKR_VERIFY_SSL=false` is accepted only for a loopback host because the local Gateway uses a self-signed certificate. Remote URLs must use normal certificate verification.
 
+### IBKR Flex cash flow
+
+1. In Client Portal, create an Activity Flex Query with **Statement of Funds**, **Base Currency Summary**, and these fields: Account ID, Currency, FX Rate To Base, Date, Settle Date, Activity Code, Activity Description, Debit, Credit, Amount, Level of Detail, and Transaction ID. XML format and currency rates should be enabled.
+2. Enable Flex Web Service and generate a token. Put the query ID and token in `.env` as `IBKR_FLEX_QUERY_ID` and `IBKR_FLEX_TOKEN`. Never commit or share the token; rotate it immediately if exposed.
+3. In the IBKR tab, open Deposits & withdrawals and choose **Fetch cash flow**. The first start date must be on or before the first account deposit.
+
+Flex Web Service is independent of Client Portal Gateway, so the Gateway does not need to be running for this cash-flow import. The token remains server-side and error messages never include request URLs or credentials.
+
 ## Run
 
 Start and log in to OpenD before refreshing Moomoo, and start/authenticate Client Portal Gateway before refreshing IBKR. Then run:
@@ -91,7 +101,7 @@ Start and log in to OpenD before refreshing Moomoo, and start/authenticate Clien
 ./start.sh
 ```
 
-Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact any broker. On the Moomoo tab, use **Fetch cash flow** under Deposits & withdrawals and add up to 20 known transaction dates; ordinary Refresh does not fetch cash flow.
+Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact any broker. Cash-flow imports are separate from ordinary Refresh: Moomoo accepts up to 20 known transaction dates, while IBKR uses the explicit Flex workflow below.
 
 Press `Ctrl+C` to stop the tracker. OpenD and Client Portal Gateway are separate applications and must be stopped separately.
 
@@ -121,8 +131,10 @@ Moomoo documents a limit of 10 account-funds requests and 10 position requests p
 - Supports one real account with SGD as its base currency.
 - Refresh calls exactly `GET /portfolio/accounts`, `GET /portfolio/{accountId}/ledger`, and `GET /portfolio2/{accountId}/positions` through the authenticated local Gateway.
 - Shows equity, cash, holdings, account and position unrealized P&L, locally accumulated equity history, and stocks/ETFs. Unexpected asset classes remain visible under Other holdings.
-- Makes no quote, order, trade, transfer, statement, or Flex request.
-- Has no contribution, return, performance, or funding-history view in v1. Deposits and withdrawals are intentionally deferred to a future Flex integration.
+- Makes no quote, order, trade, transfer, or brokerage-statement request. Portfolio Refresh still calls only the three documented local Gateway portfolio endpoints.
+- **Fetch cash flow** uses the IBKR Flex Web Service separately. On the first run, select a date on or before the account’s first deposit; the tracker downloads Statement of Funds in at most 365-day ranges and commits only after every range succeeds.
+- Later cash-flow syncs check from the previous successful sync with a two-day overlap. Transaction IDs make re-fetching safe. Only `DEP` and `WITH` activity affects contributions; trades, dividends, interest, fees, and other activity are excluded.
+- Once the initial history import succeeds, the IBKR tab and Home can calculate contribution-based P&L. The coverage start and last successful cash-flow sync remain visible.
 - Loading the page and switching tabs use only `backend/ibkr.db`; only Refresh contacts the Gateway.
 
 Official endpoint references: [accounts](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-all-accounts), [account ledger](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-portfolio-ledger), and [positions](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-uncached-positions).
@@ -137,7 +149,8 @@ The backend uses Python `Decimal` and serializes money as strings.
 - **Tiger simple return** = overall P&L ÷ net contributions × 100; it is not TWR or XIRR.
 - **Moomoo net contributions** = verified SGD DDI deposits − explicit and locally confirmed bank withdrawals. Unclassified raw cash flows contribute zero.
 - **Moomoo overall P&L and simple return** use the same formulas as Tiger after that conservative classification.
-- **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is unavailable whenever a configured broker lacks cached data or a represented broker, including IBKR v1, lacks contribution history.
+- **IBKR net contributions** = Flex Statement of Funds deposits − withdrawals, converted to SGD using each row’s reported FX-to-base rate.
+- **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is unavailable whenever a configured broker lacks cached data or a represented broker lacks complete contribution history.
 - **Holdings value** = total equity − cash.
 - **Reconciliation difference** = total equity − cash − displayed positions.
 - **Moomoo unrealized P&L** = sum of unrealized P&L returned for listed positions; aggregate fund P&L is unavailable.
@@ -171,6 +184,7 @@ backend/
   adapter.py          Tiger read-only normalization
   moomoo_adapter.py   Moomoo/OpenD read-only normalization
   ibkr_adapter.py     IBKR Gateway read-only normalization
+  ibkr_flex.py        IBKR Flex deposit/withdrawal import
   brokers.py          Broker registry, capabilities, and contribution rules
   calculations.py     Contribution and performance formulas
   database.py         SQLite schema, transactions, and deduplication
@@ -193,7 +207,7 @@ To add another broker, implement its read-only adapter, register its metadata an
 
 ## Export and backup
 
-Dashboard exports use only the selected broker's local database. Moomoo's funding export contains only the verified deposits and withdrawals used for contribution calculations.
+Dashboard exports use only the selected broker’s local database. Moomoo and IBKR funding exports contain only the verified deposits and withdrawals used for contribution calculations.
 
 ```sh
 ./backup.sh
@@ -209,7 +223,7 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
-Tests cover the broker registry, configuration and capabilities, dynamic overview iteration, financial signs, Tiger, Moomoo, and IBKR normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo and IBKR tests use fake upstream responses and make no broker request.
+Tests cover the broker registry, configuration and capabilities, dynamic overview iteration, financial signs, Tiger, Moomoo, and IBKR normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo, IBKR Gateway, and IBKR Flex tests use fake upstream responses and make no broker request.
 
 GitHub Actions runs these checks on every push and pull request. Use `npm --prefix frontend run format` to apply frontend formatting locally.
 

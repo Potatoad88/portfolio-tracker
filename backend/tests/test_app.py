@@ -300,8 +300,9 @@ class BrokerRegistryTests(unittest.TestCase):
         self.assertFalse(BROKERS["tiger"].capabilities.cash_flow_sync)
         self.assertTrue(BROKERS["moomoo"].capabilities.cash_flow_sync)
         self.assertEqual(BROKERS["ibkr"].database_default, "backend/ibkr.db")
-        self.assertFalse(BROKERS["ibkr"].capabilities.contributions)
-        self.assertFalse(BROKERS["ibkr"].capabilities.funding_history)
+        self.assertTrue(BROKERS["ibkr"].capabilities.contributions)
+        self.assertTrue(BROKERS["ibkr"].capabilities.funding_history)
+        self.assertTrue(BROKERS["ibkr"].capabilities.cash_flow_range_sync)
 
     def test_configuration_is_derived_without_constructing_adapters(self):
         with patch.object(BROKERS["tiger"], "adapter_factory", side_effect=AssertionError("adapter called")), \
@@ -328,8 +329,12 @@ class EndpointTests(unittest.TestCase):
         os.close(handle)
         second_handle, self.moomoo_path = tempfile.mkstemp(suffix=".db")
         os.close(second_handle)
-        self.original_db, self.original_moomoo_db = main.DATABASES["tiger"], main.DATABASES["moomoo"]
-        main.DATABASES["tiger"], main.DATABASES["moomoo"] = Database(self.path), Database(self.moomoo_path)
+        third_handle, self.ibkr_path = tempfile.mkstemp(suffix=".db")
+        os.close(third_handle)
+        self.original_databases = dict(main.DATABASES)
+        main.DATABASES["tiger"] = Database(self.path)
+        main.DATABASES["moomoo"] = Database(self.moomoo_path)
+        main.DATABASES["ibkr"] = Database(self.ibkr_path)
         captured = datetime(2026, 1, 3, tzinfo=timezone.utc)
         main.DATABASES["tiger"].sync(snapshot().__class__(captured, "SGD", Decimal("100"), Decimal("88"), Decimal("12"), Decimal("2"), Decimal("0"), snapshot().positions, Decimal("0.75")),
                      FUNDING, [HistoryPoint(datetime(2026, 1, 1, tzinfo=timezone.utc), Decimal("100"), Decimal("0.80")),
@@ -338,9 +343,11 @@ class EndpointTests(unittest.TestCase):
                                     holdings_value=Decimal("150"), positions=()), [], [])
 
     def tearDown(self):
-        main.DATABASES["tiger"], main.DATABASES["moomoo"] = self.original_db, self.original_moomoo_db
+        main.DATABASES.clear()
+        main.DATABASES.update(self.original_databases)
         os.unlink(self.path)
         os.unlink(self.moomoo_path)
+        os.unlink(self.ibkr_path)
         self.broker_env.stop()
 
     def test_summary_reconciles_and_converts_currency(self):

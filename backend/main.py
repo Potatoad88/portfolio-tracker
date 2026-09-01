@@ -1,20 +1,22 @@
 import csv
 import io
 import json
+import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from brokers import BROKERS, definition, requested_history_start
 from calculations import net_contributions, performance
 from database import Database
 from models import Funding
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Portfolio Tracker")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["GET", "POST"], allow_headers=["*"])
@@ -61,6 +63,15 @@ def contribution_items(store: Database, broker: str) -> list[Funding]:
     return broker_definition(broker).contribution_filter(funding_items(store))
 
 
+def has_contribution_coverage(store: Database, spec) -> bool:
+    if not spec.capabilities.contributions:
+        return False
+    if not spec.contributions_require_cash_flow_sync:
+        return True
+    state = store.one("SELECT cash_flow_complete_since FROM sync_state WHERE id=1") or {}
+    return bool(state.get("cash_flow_complete_since"))
+
+
 @app.get("/api/brokers")
 def brokers():
     return [broker.public() for broker in BROKERS.values()]
@@ -92,7 +103,8 @@ def sync(broker: str = "tiger"):
 
 
 class CashFlowRequest(BaseModel):
-    dates: list[date]
+    dates: list[date] = Field(default_factory=list)
+    startDate: date | None = None
 
 
 @app.post("/api/cash-flow/sync")
@@ -100,20 +112,46 @@ def sync_cash_flow(request: CashFlowRequest, broker: str = "moomoo"):
     spec = broker_definition(broker)
     if not spec.capabilities.cash_flow_sync:
         raise HTTPException(422, f"Cash-flow sync is not available for {spec.display_name}")
-    if not request.dates:
-        raise HTTPException(422, "Select at least one cash-flow date")
-    if len(request.dates) > 20:
-        raise HTTPException(422, "Select no more than 20 cash-flow dates")
-    if len(set(request.dates)) != len(request.dates):
-        raise HTTPException(422, "Cash-flow dates must be unique")
-    if any(value > date.today() for value in request.dates):
-        raise HTTPException(422, "Cash-flow dates cannot be in the future")
+    store = database(broker)
     try:
+        if spec.capabilities.cash_flow_range_sync:
+            if request.dates:
+                raise HTTPException(422, "IBKR cash-flow sync accepts a start date, not individual dates")
+            state = store.one("SELECT cash_flow_last_success,cash_flow_complete_since FROM sync_state WHERE id=1") or {}
+            complete_since = request.startDate
+            if request.startDate:
+                start = request.startDate
+            elif state.get("cash_flow_complete_since"):
+                last = date.fromisoformat((state.get("cash_flow_last_success") or state["cash_flow_complete_since"])[:10])
+                start = max(date.fromisoformat(state["cash_flow_complete_since"]), last - timedelta(days=2))
+            else:
+                raise HTTPException(422, "Select a start date on or before the first IBKR deposit")
+            end = date.today() - timedelta(days=1)
+            if start > end:
+                raise HTTPException(422, "Cash-flow start date must be before today")
+            factory = spec.cash_flow_factory or spec.adapter_factory
+            rows = factory().fetch_cash_flows(start, end)
+            synced_at = store.sync_cash_flows(rows, complete_since.isoformat() if complete_since else None)
+            return {"ok": True, "rawCount": len(rows), "verifiedCount": len(rows),
+                    "syncedAt": synced_at, "startDate": start.isoformat(), "endDate": end.isoformat()}
+        if request.startDate:
+            raise HTTPException(422, "This broker accepts individual cash-flow dates")
+        if not request.dates:
+            raise HTTPException(422, "Select at least one cash-flow date")
+        if len(request.dates) > 20:
+            raise HTTPException(422, "Select no more than 20 cash-flow dates")
+        if len(set(request.dates)) != len(request.dates):
+            raise HTTPException(422, "Cash-flow dates must be unique")
+        if any(value > date.today() for value in request.dates):
+            raise HTTPException(422, "Cash-flow dates cannot be in the future")
         rows = spec.adapter_factory().fetch_cash_flows(sorted(request.dates))
-        synced_at = database(broker).sync_cash_flows(rows)
+        synced_at = store.sync_cash_flows(rows)
         verified = sum(1 for item in spec.contribution_filter(rows) if item.type)
         return {"ok": True, "rawCount": len(rows), "verifiedCount": verified, "syncedAt": synced_at}
+    except HTTPException:
+        raise
     except spec.errors as exc:
+        logger.warning("%s cash-flow sync failed: %s", spec.display_name, exc)
         raise HTTPException(502, detail=str(exc)) from exc
 
 
@@ -122,19 +160,20 @@ def summary(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     spec = broker_definition(broker)
     store = database(broker)
     snap = store.one("SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
+    contributions_supported = has_contribution_coverage(store, spec)
     if not snap:
-        return {"empty": True, "supportsContributions": spec.capabilities.contributions}
+        return {"empty": True, "supportsContributions": contributions_supported}
     factor = currency_factor(currency, snap)
     position_total = sum((Decimal(row["market_value"]) for row in store.rows(
         "SELECT market_value FROM positions WHERE snapshot_id=?", (snap["id"],))), Decimal())
-    result = {"empty": False, "broker": broker, "supportsContributions": spec.capabilities.contributions,
+    result = {"empty": False, "broker": broker, "supportsContributions": contributions_supported,
               "currency": currency, "totalEquity": converted(snap["total_equity"], factor),
               "cash": converted(snap["cash"], factor), "holdingsValue": converted(snap["holdings_value"], factor),
               "unrealizedPnl": converted(snap["unrealized_pnl"], factor),
               "realizedPnl": converted(snap["realized_pnl"], factor),
               "reconciliationDifference": str((Decimal(snap["total_equity"]) - Decimal(snap["cash"]) - position_total) * factor),
               "capturedAt": snap["captured_at"]}
-    if spec.capabilities.contributions:
+    if contributions_supported:
         try:
             contributions = net_contributions(contribution_items(store, broker))
         except ValueError as exc:
@@ -155,7 +194,7 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
     for spec in BROKERS.values():
         store = database(spec.id)
         snap = store.one("SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
-        state = store.one("SELECT last_success,last_error FROM sync_state WHERE id=1") or {}
+        state = store.one("SELECT last_success,last_error,cash_flow_complete_since FROM sync_state WHERE id=1") or {}
         if not snap:
             if spec.configured:
                 missing.append(spec.id)
@@ -173,8 +212,9 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
         unclassified = holdings - stocks - funds
         if abs(unclassified) < Decimal("1"):
             unclassified = Decimal()
+        contributions_complete = has_contribution_coverage(store, spec)
         contributions = (net_contributions(contribution_items(store, spec.id))
-                         if spec.capabilities.contributions else Decimal())
+                         if contributions_complete else Decimal())
         values = {"totalEquity": Decimal(snap["total_equity"]), "netContributions": contributions,
                   "cash": Decimal(snap["cash"]), "holdingsValue": holdings,
                   "stocksValue": stocks, "fundsValue": funds,
@@ -185,10 +225,11 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
                                "configured": spec.configured, "hasData": True,
                                "totalEquity": str(values["totalEquity"] * factor), "allocationPct": "0",
                                "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"),
-                               "stale": is_stale(state.get("last_success"))})
+                               "stale": is_stale(state.get("last_success")),
+                               "contributionComplete": contributions_complete})
     represented = sum(item["hasData"] for item in result_brokers)
     missing_contributions = [item["broker"] for item in result_brokers if item["hasData"]
-                             and not BROKERS[item["broker"]].capabilities.contributions]
+                             and not item.get("contributionComplete", False)]
     pnl_complete = not missing and not missing_contributions
     for item in result_brokers:
         if totals["totalEquity"] and item["hasData"]:
@@ -251,7 +292,7 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     if not stored:
         stored = store.rows("SELECT captured_at,total_equity,sgd_to_usd FROM portfolio_snapshots ORDER BY captured_at")
     spec = broker_definition(broker)
-    items = contribution_items(store, broker) if spec.capabilities.contributions else []
+    items = contribution_items(store, broker) if has_contribution_coverage(store, spec) else []
     previous_contributions: Decimal | None = None
     for row in stored:
         point_date = datetime.fromisoformat(row["captured_at"]).date()
@@ -269,11 +310,12 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
 
 @app.get("/api/sync/status")
 def status(broker: str = "tiger"):
-    state = database(broker).one("SELECT last_success,last_error,components,cash_flow_last_success FROM sync_state WHERE id=1") or {}
+    state = database(broker).one("SELECT last_success,last_error,components,cash_flow_last_success,cash_flow_complete_since FROM sync_state WHERE id=1") or {}
     last = state.get("last_success")
     return {"lastSuccess": last, "lastError": state.get("last_error"), "stale": is_stale(last), "mode": "live",
             "broker": broker, "components": json.loads(state.get("components") or "{}"),
-            "cashFlowLastSuccess": state.get("cash_flow_last_success")}
+            "cashFlowLastSuccess": state.get("cash_flow_last_success"),
+            "cashFlowCompleteSince": state.get("cash_flow_complete_since")}
 
 
 @app.get("/api/export/{dataset}")

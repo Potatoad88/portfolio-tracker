@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS positions (
  asset_type TEXT NOT NULL DEFAULT 'STK');
 CREATE TABLE IF NOT EXISTS history (captured_at TEXT PRIMARY KEY, total_equity TEXT NOT NULL, sgd_to_usd TEXT NOT NULL DEFAULT '1');
 CREATE TABLE IF NOT EXISTS sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT, last_error TEXT,
- components TEXT NOT NULL DEFAULT '{}', cash_flow_checked_through TEXT, cash_flow_last_success TEXT);
+ components TEXT NOT NULL DEFAULT '{}', cash_flow_checked_through TEXT, cash_flow_last_success TEXT,
+ cash_flow_complete_since TEXT);
 INSERT OR IGNORE INTO sync_state(id) VALUES(1);
 """
 
@@ -51,6 +52,8 @@ class Database:
                 db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_checked_through TEXT")
             if "cash_flow_last_success" not in state_columns:
                 db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_last_success TEXT")
+            if "cash_flow_complete_since" not in state_columns:
+                db.execute("ALTER TABLE sync_state ADD COLUMN cash_flow_complete_since TEXT")
             db.execute("""UPDATE sync_state SET cash_flow_checked_through=substr(last_success,1,10)
                        WHERE cash_flow_checked_through IS NULL AND last_success IS NOT NULL""")
             funding_columns = {row[1] for row in db.execute("PRAGMA table_info(funding_transactions)")}
@@ -118,8 +121,10 @@ class Database:
         with self.connect() as db:
             db.execute("UPDATE sync_state SET last_error=? WHERE id=1", (message,))
 
-    def sync_cash_flows(self, funding: list[Funding]) -> str:
+    def sync_cash_flows(self, funding: list[Funding], complete_since: str | date | None = None) -> str:
         now = datetime.now(timezone.utc).isoformat()
+        if isinstance(complete_since, date):
+            complete_since = complete_since.isoformat()
         with self.connect() as db:
             for item in funding:
                 db.execute("""INSERT INTO funding_transactions(transaction_id,type,currency,amount,business_date,completed,created_at,updated_at,direction,settlement_date,remark)
@@ -130,7 +135,12 @@ class Database:
                     (item.transaction_id, item.type, item.currency, str(item.amount), item.business_date.isoformat(),
                      int(item.completed), now, now, item.direction,
                      item.settlement_date.isoformat() if item.settlement_date else None, item.remark))
-            db.execute("UPDATE sync_state SET cash_flow_last_success=? WHERE id=1", (now,))
+            db.execute("""UPDATE sync_state SET cash_flow_last_success=?,
+                       cash_flow_complete_since=CASE
+                         WHEN ? IS NULL THEN cash_flow_complete_since
+                         WHEN cash_flow_complete_since IS NULL OR ? < cash_flow_complete_since THEN ?
+                         ELSE cash_flow_complete_since END
+                       WHERE id=1""", (now, complete_since, complete_since, complete_since))
         return now
 
     def rows(self, sql: str, params=()):
