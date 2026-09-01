@@ -1,16 +1,21 @@
 from datetime import datetime
 from pathlib import Path
 import sqlite3
+import sys
 
 
 root = Path(__file__).resolve().parents[1]
-paths = {"tiger": "backend/portfolio.db", "moomoo": "backend/moomoo.db"}
+sys.path.insert(0, str(root / "backend"))
+from brokers import BROKERS  # noqa: E402
+
+paths = {broker.id: broker.database_default for broker in BROKERS.values()}
 env_path = root / ".env"
 if env_path.exists():
-    for line in env_path.read_text().splitlines():
-        for broker, variable in (("tiger", "TIGER_DB_PATH"), ("moomoo", "MOOMOO_DB_PATH")):
-            if line.startswith(f"{variable}="):
-                paths[broker] = line.split("=", 1)[1].strip().strip('"\'')
+    settings = dict(line.split("=", 1) for line in env_path.read_text().splitlines()
+                    if line and not line.lstrip().startswith("#") and "=" in line)
+    for broker in BROKERS.values():
+        if settings.get(broker.database_env):
+            paths[broker.id] = settings[broker.database_env].strip().strip('"\'')
 
 destination_dir = root / "backups"
 destination_dir.mkdir(exist_ok=True)

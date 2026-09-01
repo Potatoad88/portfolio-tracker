@@ -2,7 +2,7 @@ import csv
 import io
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -10,26 +10,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from adapter import TigerError, adapter as tiger_adapter
+from brokers import BROKERS, definition, requested_history_start
 from calculations import net_contributions, performance
 from database import Database
 from models import Funding
-from moomoo_adapter import MoomooAdapter, MoomooError
 
 app = FastAPI(title="Portfolio Tracker")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["GET", "POST"], allow_headers=["*"])
-db = Database(os.getenv("TIGER_DB_PATH", "backend/portfolio.db"))
-moomoo_db = Database(os.getenv("MOOMOO_DB_PATH", "backend/moomoo.db"))
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+                   allow_methods=["GET", "POST"], allow_headers=["*"])
+DATABASES = {broker.id: Database(os.getenv(broker.database_env, broker.database_default)) for broker in BROKERS.values()}
 FUNDING_LABELS = {"1": "Deposit", "3": "Withdrawal", "20": "Withdrawal fee", "21": "Withdrawal refund",
                   "22": "Failed-withdrawal refund", "23": "Withdrawal-fee refund"}
 
 
+def broker_definition(broker: str):
+    try:
+        return definition(broker)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def database(broker: str) -> Database:
-    if broker == "tiger":
-        return db
-    if broker == "moomoo":
-        return moomoo_db
-    raise HTTPException(422, "Broker must be tiger or moomoo")
+    broker_definition(broker)
+    return DATABASES[broker]
 
 
 def currency_factor(currency: str, snapshot: dict) -> Decimal:
@@ -54,40 +57,33 @@ def funding_items(store: Database) -> list[Funding]:
             for row in store.rows("SELECT * FROM funding_transactions")]
 
 
-def moomoo_contributions(items: list[Funding]) -> list[Funding]:
-    manual = {value.strip() for value in os.getenv("MOOMOO_MANUAL_WITHDRAWALS", "").split(",") if value.strip()}
-    result = []
-    for item in items:
-        kind = ""
-        if item.currency.upper() == "SGD" and item.direction == "IN" and item.remark.upper().startswith(("DDIIRC", "DDIIRGPC")):
-            kind = "DEPOSIT"
-        elif item.currency.upper() == "SGD" and (item.type == "Bank Transfer Withdrawals" or f"{item.business_date.isoformat()}:{abs(item.amount)}" in manual):
-            kind = "WITHDRAWAL"
-        result.append(Funding(item.transaction_id, kind, item.currency, item.amount, item.business_date,
-                              item.completed, item.direction, item.settlement_date, item.remark))
-    return result
-
-
 def contribution_items(store: Database, broker: str) -> list[Funding]:
-    items = funding_items(store)
-    return items if broker == "tiger" else moomoo_contributions(items)
+    return broker_definition(broker).contribution_filter(funding_items(store))
+
+
+@app.get("/api/brokers")
+def brokers():
+    return [broker.public() for broker in BROKERS.values()]
 
 
 @app.post("/api/sync")
 def sync(broker: str = "tiger"):
+    spec = broker_definition(broker)
     store = database(broker)
     try:
-        latest = store.one("SELECT captured_at FROM history ORDER BY captured_at DESC LIMIT 1")
-        history_start = (datetime.fromisoformat(latest["captured_at"]).date() - timedelta(days=1)).isoformat() if latest else "2015-01-01"
-        client = tiger_adapter() if broker == "tiger" else MoomooAdapter()
-        snapshot, funding_rows, history_rows = client.fetch() if broker == "moomoo" else client.fetch(history_start)
-        if broker == "tiger":
+        client = spec.adapter_factory()
+        if spec.fetches_history:
+            latest = store.one("SELECT captured_at FROM history ORDER BY captured_at DESC LIMIT 1")
+            snapshot, funding_rows, history_rows = client.fetch(requested_history_start(latest))
+        else:
+            snapshot, funding_rows, history_rows = client.fetch()
+        if spec.validates_funding:
             net_contributions(funding_rows)
         if snapshot.reporting_currency != "SGD":
             raise ValueError("Unexpected snapshot currency; SGD required")
         store.sync(snapshot, funding_rows, history_rows, client.components)
         return {"ok": True, "broker": broker, "capturedAt": snapshot.captured_at.isoformat()}
-    except (TigerError, MoomooError, ValueError) as exc:
+    except (*spec.errors, ValueError) as exc:
         store.record_error(str(exc))
         raise HTTPException(status_code=422 if isinstance(exc, ValueError) else 502, detail=str(exc)) from exc
     except Exception as exc:
@@ -101,8 +97,9 @@ class CashFlowRequest(BaseModel):
 
 @app.post("/api/cash-flow/sync")
 def sync_cash_flow(request: CashFlowRequest, broker: str = "moomoo"):
-    if broker != "moomoo":
-        raise HTTPException(422, "Cash-flow sync is available only for Moomoo")
+    spec = broker_definition(broker)
+    if not spec.capabilities.cash_flow_sync:
+        raise HTTPException(422, f"Cash-flow sync is not available for {spec.display_name}")
     if not request.dates:
         raise HTTPException(422, "Select at least one cash-flow date")
     if len(request.dates) > 20:
@@ -112,32 +109,32 @@ def sync_cash_flow(request: CashFlowRequest, broker: str = "moomoo"):
     if any(value > date.today() for value in request.dates):
         raise HTTPException(422, "Cash-flow dates cannot be in the future")
     try:
-        rows = MoomooAdapter().fetch_cash_flows(sorted(request.dates))
-        synced_at = moomoo_db.sync_cash_flows(rows)
-        verified = sum(1 for item in moomoo_contributions(rows) if item.type)
+        rows = spec.adapter_factory().fetch_cash_flows(sorted(request.dates))
+        synced_at = database(broker).sync_cash_flows(rows)
+        verified = sum(1 for item in spec.contribution_filter(rows) if item.type)
         return {"ok": True, "rawCount": len(rows), "verifiedCount": verified, "syncedAt": synced_at}
-    except MoomooError as exc:
+    except spec.errors as exc:
         raise HTTPException(502, detail=str(exc)) from exc
 
 
 @app.get("/api/summary")
 def summary(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "tiger"):
+    spec = broker_definition(broker)
     store = database(broker)
-    supports_contributions = True
     snap = store.one("SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
     if not snap:
-        return {"empty": True, "supportsContributions": supports_contributions}
+        return {"empty": True, "supportsContributions": spec.capabilities.contributions}
     factor = currency_factor(currency, snap)
     position_total = sum((Decimal(row["market_value"]) for row in store.rows(
         "SELECT market_value FROM positions WHERE snapshot_id=?", (snap["id"],))), Decimal())
-    result = {"empty": False, "broker": broker, "supportsContributions": supports_contributions,
+    result = {"empty": False, "broker": broker, "supportsContributions": spec.capabilities.contributions,
               "currency": currency, "totalEquity": converted(snap["total_equity"], factor),
               "cash": converted(snap["cash"], factor), "holdingsValue": converted(snap["holdings_value"], factor),
               "unrealizedPnl": converted(snap["unrealized_pnl"], factor),
               "realizedPnl": converted(snap["realized_pnl"], factor),
               "reconciliationDifference": str((Decimal(snap["total_equity"]) - Decimal(snap["cash"]) - position_total) * factor),
               "capturedAt": snap["captured_at"]}
-    if supports_contributions:
+    if spec.capabilities.contributions:
         try:
             contributions = net_contributions(contribution_items(store, broker))
         except ValueError as exc:
@@ -152,15 +149,20 @@ def summary(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
 def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
     keys = ("totalEquity", "netContributions", "cash", "holdingsValue", "stocksValue", "fundsValue", "otherHoldingsValue")
     totals = {key: Decimal() for key in keys}
-    brokers = []
+    result_brokers = []
     missing = []
-    for name, store in (("tiger", db), ("moomoo", moomoo_db)):
+    configured_count = sum(broker.configured for broker in BROKERS.values())
+    for spec in BROKERS.values():
+        store = database(spec.id)
         snap = store.one("SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
         state = store.one("SELECT last_success,last_error FROM sync_state WHERE id=1") or {}
         if not snap:
-            missing.append(name)
-            brokers.append({"broker": name, "hasData": False, "totalEquity": "0", "allocationPct": "0",
-                            "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"), "stale": True})
+            if spec.configured:
+                missing.append(spec.id)
+            result_brokers.append({"broker": spec.id, "displayName": spec.display_name,
+                                   "configured": spec.configured, "hasData": False, "totalEquity": "0",
+                                   "allocationPct": "0", "lastSuccess": state.get("last_success"),
+                                   "lastError": state.get("last_error"), "stale": True})
             continue
         factor = currency_factor(currency, snap)
         rows = store.rows("SELECT market_value,asset_type FROM positions WHERE snapshot_id=?", (snap["id"],))
@@ -170,22 +172,27 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
         unclassified = holdings - stocks - funds
         if abs(unclassified) < Decimal("1"):
             unclassified = Decimal()
-        values = {"totalEquity": Decimal(snap["total_equity"]),
-                  "netContributions": net_contributions(contribution_items(store, name)),
+        contributions = (net_contributions(contribution_items(store, spec.id))
+                         if spec.capabilities.contributions else Decimal())
+        values = {"totalEquity": Decimal(snap["total_equity"]), "netContributions": contributions,
                   "cash": Decimal(snap["cash"]), "holdingsValue": holdings,
                   "stocksValue": stocks, "fundsValue": funds,
                   "otherHoldingsValue": max(unclassified, Decimal())}
         for key, value in values.items():
             totals[key] += value * factor
-        brokers.append({"broker": name, "hasData": True, "totalEquity": str(values["totalEquity"] * factor),
-                        "allocationPct": "0", "lastSuccess": state.get("last_success"),
-                        "lastError": state.get("last_error"), "stale": is_stale(state.get("last_success"))})
-    for item in brokers:
+        result_brokers.append({"broker": spec.id, "displayName": spec.display_name,
+                               "configured": spec.configured, "hasData": True,
+                               "totalEquity": str(values["totalEquity"] * factor), "allocationPct": "0",
+                               "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"),
+                               "stale": is_stale(state.get("last_success"))})
+    represented = sum(item["hasData"] for item in result_brokers)
+    for item in result_brokers:
         if totals["totalEquity"] and item["hasData"]:
             item["allocationPct"] = str(Decimal(item["totalEquity"]) / totals["totalEquity"] * 100)
     return {"currency": currency, "complete": not missing, "missingBrokers": missing,
-            "brokerCount": 2 - len(missing), **{key: str(value) for key, value in totals.items()},
-            "overallPnl": str(totals["totalEquity"] - totals["netContributions"]), "brokers": brokers}
+            "supportedBrokerCount": len(BROKERS), "configuredBrokerCount": configured_count,
+            "brokerCount": represented, **{key: str(value) for key, value in totals.items()},
+            "overallPnl": str(totals["totalEquity"] - totals["netContributions"]), "brokers": result_brokers}
 
 
 @app.get("/api/positions")
@@ -206,23 +213,27 @@ def positions(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str =
 
 @app.get("/api/funding")
 def funding(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "tiger"):
+    spec = broker_definition(broker)
+    if not spec.capabilities.funding_history:
+        return []
     store = database(broker)
     snap = store.one("SELECT sgd_to_usd FROM portfolio_snapshots ORDER BY id DESC LIMIT 1") or {"sgd_to_usd": "1"}
     factor = currency_factor(currency, snap)
-    if broker == "moomoo":
+    items = contribution_items(store, broker)
+    if spec.display_filtered_contributions:
         rows = [{"transaction_id": item.transaction_id, "type": item.type, "currency": item.currency,
                  "amount": str(item.amount), "business_date": item.business_date.isoformat(),
                  "completed": int(item.completed), "direction": item.direction,
                  "settlement_date": item.settlement_date.isoformat() if item.settlement_date else None,
-                 "remark": item.remark} for item in contribution_items(store, broker) if item.type]
+                 "remark": item.remark} for item in items if item.type]
         rows.sort(key=lambda row: row["business_date"], reverse=True)
     else:
         rows = store.rows("SELECT transaction_id,type,currency,amount,business_date,completed,direction,settlement_date,remark FROM funding_transactions ORDER BY business_date DESC")
     for row in rows:
         row["original_currency"] = row["currency"]
-        row["display_currency"] = row["currency"] if broker == "moomoo" else currency
+        row["display_currency"] = currency if spec.convert_funding_currency else row["currency"]
         row["type_label"] = FUNDING_LABELS.get(row["type"], row["type"].replace("_", " ").title())
-        if broker == "tiger":
+        if spec.convert_funding_currency:
             row["amount"] = converted(row["amount"], factor)
     return rows
 
@@ -233,7 +244,8 @@ def history(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     stored = store.rows("SELECT captured_at,total_equity,sgd_to_usd FROM history ORDER BY captured_at")
     if not stored:
         stored = store.rows("SELECT captured_at,total_equity,sgd_to_usd FROM portfolio_snapshots ORDER BY captured_at")
-    items = contribution_items(store, broker)
+    spec = broker_definition(broker)
+    items = contribution_items(store, broker) if spec.capabilities.contributions else []
     previous_contributions: Decimal | None = None
     for row in stored:
         point_date = datetime.fromisoformat(row["captured_at"]).date()
@@ -260,6 +272,9 @@ def status(broker: str = "tiger"):
 
 @app.get("/api/export/{dataset}")
 def export_csv(dataset: str, currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "tiger"):
+    spec = broker_definition(broker)
+    if not spec.capabilities.exports:
+        raise HTTPException(422, f"Exports are not available for {spec.display_name}")
     sources = {"positions": lambda: positions(currency, broker), "funding": lambda: funding(currency, broker),
                "history": lambda: history(currency, broker)}
     if dataset not in sources:

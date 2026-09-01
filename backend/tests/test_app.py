@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
+from brokers import BROKERS, BrokerCapabilities, BrokerDefinition, definition
 from calculations import net_contributions, performance
 from adapter import LiveTigerAdapter, _funds_are_excluded
 from database import Database
@@ -290,25 +291,54 @@ class MoomooAdapterTests(unittest.TestCase):
                 MoomooAdapter(client=self.Client(), sdk=self.Sdk)
 
 
+class BrokerRegistryTests(unittest.TestCase):
+    def test_registry_ids_order_paths_and_capabilities(self):
+        self.assertEqual(list(BROKERS), ["tiger", "moomoo"])
+        self.assertTrue(all(key == broker.id for key, broker in BROKERS.items()))
+        self.assertEqual(BROKERS["tiger"].database_default, "backend/portfolio.db")
+        self.assertTrue(BROKERS["tiger"].fetches_history)
+        self.assertFalse(BROKERS["tiger"].capabilities.cash_flow_sync)
+        self.assertTrue(BROKERS["moomoo"].capabilities.cash_flow_sync)
+
+    def test_configuration_is_derived_without_constructing_adapters(self):
+        with patch.object(BROKERS["tiger"], "adapter_factory", side_effect=AssertionError("adapter called")), \
+             patch.object(BROKERS["moomoo"], "adapter_factory", side_effect=AssertionError("adapter called")), \
+             patch.dict(os.environ, {"TIGER_ID": "x", "TIGER_ACCOUNT": "x", "TIGER_PRIVATE_KEY_PATH": "x",
+                                     "MOOMOO_ACCOUNT_ID": "42"}, clear=True):
+            metadata = main.brokers()
+        self.assertTrue(all(item["configured"] for item in metadata))
+        self.assertTrue(metadata[1]["capabilities"]["cashFlowSync"])
+
+    def test_unknown_broker_definition_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Broker must be one of"):
+            definition("unknown")
+
+
 class EndpointTests(unittest.TestCase):
     def setUp(self):
+        self.broker_env = patch.dict(os.environ, {
+            "TIGER_ID": "test", "TIGER_ACCOUNT": "test", "TIGER_PRIVATE_KEY_PATH": "test.pem",
+            "MOOMOO_ACCOUNT_ID": "42",
+        })
+        self.broker_env.start()
         handle, self.path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         second_handle, self.moomoo_path = tempfile.mkstemp(suffix=".db")
         os.close(second_handle)
-        self.original_db, self.original_moomoo_db = main.db, main.moomoo_db
-        main.db, main.moomoo_db = Database(self.path), Database(self.moomoo_path)
+        self.original_db, self.original_moomoo_db = main.DATABASES["tiger"], main.DATABASES["moomoo"]
+        main.DATABASES["tiger"], main.DATABASES["moomoo"] = Database(self.path), Database(self.moomoo_path)
         captured = datetime(2026, 1, 3, tzinfo=timezone.utc)
-        main.db.sync(snapshot().__class__(captured, "SGD", Decimal("100"), Decimal("88"), Decimal("12"), Decimal("2"), Decimal("0"), snapshot().positions, Decimal("0.75")),
+        main.DATABASES["tiger"].sync(snapshot().__class__(captured, "SGD", Decimal("100"), Decimal("88"), Decimal("12"), Decimal("2"), Decimal("0"), snapshot().positions, Decimal("0.75")),
                      FUNDING, [HistoryPoint(datetime(2026, 1, 1, tzinfo=timezone.utc), Decimal("100"), Decimal("0.80")),
                                HistoryPoint(datetime(2026, 1, 2, tzinfo=timezone.utc), Decimal("95"), Decimal("0.70"))])
-        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+        main.DATABASES["moomoo"].sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
                                     holdings_value=Decimal("150"), positions=()), [], [])
 
     def tearDown(self):
-        main.db, main.moomoo_db = self.original_db, self.original_moomoo_db
+        main.DATABASES["tiger"], main.DATABASES["moomoo"] = self.original_db, self.original_moomoo_db
         os.unlink(self.path)
         os.unlink(self.moomoo_path)
+        self.broker_env.stop()
 
     def test_summary_reconciles_and_converts_currency(self):
         sgd, usd = main.summary("SGD"), main.summary("USD")
@@ -350,7 +380,7 @@ class EndpointTests(unittest.TestCase):
         flows = [Funding("fund", "Fund Redemption", "USD", Decimal("12.5"), date(2026, 1, 2), True, "IN"),
                  Funding("deposit", "Others", "SGD", Decimal("500"), date(2026, 1, 3), True,
                          "IN", remark="DDIIRGPC123")]
-        main.moomoo_db.sync(replace(snapshot(), positions=()), flows, [])
+        main.DATABASES["moomoo"].sync(replace(snapshot(), positions=()), flows, [])
         rows = main.funding("SGD", "moomoo")
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["type_label"], rows[0]["amount"], rows[0]["display_currency"]),
@@ -364,12 +394,26 @@ class EndpointTests(unittest.TestCase):
             Funding("legacy", "Others", "SGD", Decimal("-50"), date(2026, 1, 3), True, "OUT", remark="legacy"),
             Funding("fund", "Fund Redemption", "SGD", Decimal("999"), date(2026, 1, 3), True, "IN"),
         ]
-        main.moomoo_db.sync(replace(snapshot(), positions=()), flows, [])
+        main.DATABASES["moomoo"].sync(replace(snapshot(), positions=()), flows, [])
         with patch.dict(os.environ, {"MOOMOO_MANUAL_WITHDRAWALS": "2026-01-03:50"}):
             result = main.summary("SGD", "moomoo")
             overview = main.overview("SGD")
         self.assertEqual(result["netContributions"], "350")
         self.assertEqual((overview["netContributions"], overview["overallPnl"]), ("439", "-239"))
+
+    def test_tiger_portfolio_sync_receives_incremental_history_start(self):
+        calls = []
+
+        class Client:
+            components = {"assets": "ok"}
+
+            def fetch(self, start):
+                calls.append(start)
+                return snapshot(), [], []
+
+        with patch.object(BROKERS["tiger"], "adapter_factory", return_value=Client()):
+            main.sync("tiger")
+        self.assertEqual(calls, ["2026-01-01"])
 
     def test_moomoo_portfolio_sync_does_not_fetch_cash_flow(self):
         calls = []
@@ -381,7 +425,7 @@ class EndpointTests(unittest.TestCase):
                 calls.append(args)
                 return replace(snapshot(), positions=()), [], []
 
-        with patch.object(main, "MoomooAdapter", return_value=Client()):
+        with patch.object(BROKERS["moomoo"], "adapter_factory", return_value=Client()):
             main.sync("moomoo")
         self.assertEqual(calls, [()])
 
@@ -409,34 +453,34 @@ class EndpointTests(unittest.TestCase):
                 calls.append(dates)
                 return flows
 
-        with patch.object(main, "MoomooAdapter", return_value=Client()):
+        with patch.object(BROKERS["moomoo"], "adapter_factory", return_value=Client()):
             result = main.sync_cash_flow(main.CashFlowRequest(dates=selected))
             main.sync_cash_flow(main.CashFlowRequest(dates=selected))
         self.assertEqual(calls[0], sorted(selected))
         self.assertEqual((result["rawCount"], result["verifiedCount"]), (2, 1))
-        self.assertEqual(len(main.moomoo_db.rows("SELECT * FROM funding_transactions")), 2)
+        self.assertEqual(len(main.DATABASES["moomoo"].rows("SELECT * FROM funding_transactions")), 2)
         self.assertEqual(len(main.funding("SGD", "moomoo")), 1)
         self.assertIsNotNone(main.status("moomoo")["cashFlowLastSuccess"])
 
     def test_cash_flow_failure_preserves_existing_rows(self):
-        main.moomoo_db.sync_cash_flows([Funding("existing", "Others", "SGD", Decimal("1"), date.today(), True, "IN")])
-        before = main.moomoo_db.one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"]
+        main.DATABASES["moomoo"].sync_cash_flows([Funding("existing", "Others", "SGD", Decimal("1"), date.today(), True, "IN")])
+        before = main.DATABASES["moomoo"].one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"]
 
         class Client:
             def fetch_cash_flows(self, dates):
                 raise MoomooError("OpenD unavailable")
 
-        with patch.object(main, "MoomooAdapter", return_value=Client()), self.assertRaises(main.HTTPException):
+        with patch.object(BROKERS["moomoo"], "adapter_factory", return_value=Client()), self.assertRaises(main.HTTPException):
             main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]))
-        self.assertEqual(len(main.moomoo_db.rows("SELECT * FROM funding_transactions")), 1)
-        self.assertEqual(main.moomoo_db.one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"], before)
+        self.assertEqual(len(main.DATABASES["moomoo"].rows("SELECT * FROM funding_transactions")), 1)
+        self.assertEqual(main.DATABASES["moomoo"].one("SELECT cash_flow_last_success FROM sync_state WHERE id=1")["cash_flow_last_success"], before)
 
     def test_empty_cash_flow_sync_updates_timestamp(self):
         class Client:
             def fetch_cash_flows(self, dates):
                 return []
 
-        with patch.object(main, "MoomooAdapter", return_value=Client()):
+        with patch.object(BROKERS["moomoo"], "adapter_factory", return_value=Client()):
             result = main.sync_cash_flow(main.CashFlowRequest(dates=[date.today()]))
         self.assertEqual((result["rawCount"], result["verifiedCount"]), (0, 0))
         self.assertIsNotNone(main.status("moomoo")["cashFlowLastSuccess"])
@@ -452,16 +496,16 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(result["brokers"][0]["allocationPct"], str(Decimal("100") / Decimal("300") * 100))
 
     def test_overview_hides_immaterial_unclassified_rounding(self):
-        main.db.sync(replace(snapshot(), holdings_value=Decimal("12.50")), [], [])
-        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+        main.DATABASES["tiger"].sync(replace(snapshot(), holdings_value=Decimal("12.50")), [], [])
+        main.DATABASES["moomoo"].sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
                                     holdings_value=Decimal("150"), positions=()), [], [])
         self.assertEqual(main.overview("SGD")["otherHoldingsValue"], "150")
 
     def test_overview_uses_each_brokers_fx_rate_without_adapters(self):
-        main.moomoo_db.sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
+        main.DATABASES["moomoo"].sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
                                     holdings_value=Decimal("150"), positions=(), sgd_to_usd=Decimal("0.5")), [], [])
-        with patch.object(main, "tiger_adapter", side_effect=AssertionError("adapter called")), \
-             patch.object(main, "MoomooAdapter", side_effect=AssertionError("adapter called")):
+        with patch.object(BROKERS["tiger"], "adapter_factory", side_effect=AssertionError("adapter called")), \
+             patch.object(BROKERS["moomoo"], "adapter_factory", side_effect=AssertionError("adapter called")):
             result = main.overview("USD")
         self.assertEqual((result["totalEquity"], result["netContributions"], result["overallPnl"]),
                          ("175.00", "66.75", "108.25"))
@@ -470,12 +514,12 @@ class EndpointTests(unittest.TestCase):
     def test_overview_marks_missing_broker_without_hiding_available_data(self):
         handle, empty_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
-        original = main.moomoo_db
+        original = main.DATABASES["moomoo"]
         try:
-            main.moomoo_db = Database(empty_path)
+            main.DATABASES["moomoo"] = Database(empty_path)
             result = main.overview("SGD")
         finally:
-            main.moomoo_db = original
+            main.DATABASES["moomoo"] = original
             os.unlink(empty_path)
         self.assertFalse(result["complete"])
         self.assertEqual(result["missingBrokers"], ["moomoo"])
@@ -487,16 +531,42 @@ class EndpointTests(unittest.TestCase):
         second_handle, second_path = tempfile.mkstemp(suffix=".db")
         os.close(first_handle)
         os.close(second_handle)
-        original = main.db, main.moomoo_db
+        original = main.DATABASES["tiger"], main.DATABASES["moomoo"]
         try:
-            main.db, main.moomoo_db = Database(first_path), Database(second_path)
+            main.DATABASES["tiger"], main.DATABASES["moomoo"] = Database(first_path), Database(second_path)
             result = main.overview("SGD")
         finally:
-            main.db, main.moomoo_db = original
+            main.DATABASES["tiger"], main.DATABASES["moomoo"] = original
             os.unlink(first_path)
             os.unlink(second_path)
         self.assertEqual((result["brokerCount"], result["totalEquity"]), (0, "0"))
         self.assertEqual(result["missingBrokers"], ["tiger", "moomoo"])
+
+    def test_overview_iterates_a_new_registry_entry_without_adapter_calls(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        extra = BrokerDefinition("extra", "Extra", "EXTRA_DB_PATH", path, (),
+                                 lambda: (_ for _ in ()).throw(AssertionError("adapter called")),
+                                 (RuntimeError,), BrokerCapabilities())
+        store = Database(path)
+        store.sync(replace(snapshot(), total_equity=Decimal("50"), cash=Decimal("10"),
+                           holdings_value=Decimal("40")), [], [])
+        try:
+            with patch.dict(BROKERS, {"extra": extra}), patch.dict(main.DATABASES, {"extra": store}):
+                result = main.overview("SGD")
+            self.assertEqual((result["supportedBrokerCount"], result["brokerCount"], result["totalEquity"]),
+                             (3, 3, "350"))
+        finally:
+            os.unlink(path)
+
+    def test_unconfigured_broker_is_visible_but_not_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            metadata = main.brokers()
+            result = main.overview("SGD")
+        self.assertFalse(any(item["configured"] for item in metadata))
+        self.assertEqual(result["configuredBrokerCount"], 0)
+        self.assertEqual(result["missingBrokers"], [])
+        self.assertTrue(result["complete"])
 
     def test_overview_rejects_unsupported_currency(self):
         messages = []

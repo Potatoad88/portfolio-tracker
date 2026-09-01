@@ -113,10 +113,11 @@ Differences below one displayed currency unit are treated as valuation timing or
 
 ## Local API
 
-Every endpoint accepts `broker=tiger|moomoo`; omitting it preserves the original Tiger behavior.
+Broker-aware endpoints accept any ID returned by `GET /api/brokers`; omitting `broker` preserves the original Tiger behavior.
 
 | Method | Path | Purpose | Broker request |
 | --- | --- | --- | --- |
+| `GET` | `/api/brokers` | Supported brokers, configuration state, and capabilities | No |
 | `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store current portfolio data | Yes |
 | `POST` | `/api/cash-flow/sync?broker=moomoo` | Fetch up to 20 explicitly selected cash-flow dates | Yes |
 | `GET` | `/api/overview?currency=SGD` | Cached cross-broker totals, allocation, and health | No |
@@ -135,18 +136,25 @@ Only SGD and USD are accepted as display currencies.
 backend/
   adapter.py          Tiger read-only normalization
   moomoo_adapter.py   Moomoo/OpenD read-only normalization
+  brokers.py          Broker registry, capabilities, and contribution rules
   calculations.py     Contribution and performance formulas
   database.py         SQLite schema, transactions, and deduplication
-  main.py             Broker-aware FastAPI endpoints
+  main.py             Registry-driven FastAPI orchestration
   models.py           Immutable normalized records
 frontend/src/
-  App.tsx              Cached home and broker-tab dashboards
+  App.tsx              Broker discovery and selected-view coordination
+  api.ts               Shared local API and money formatting
+  types.ts             Broker and portfolio response types
+  components/          Shared header, chart, tables, sections, and dialogs
+  pages/               Home and broker portfolio pages
   main.tsx             Theme and React entry point
 scripts/
-  backup_database.py   Consistent broker database backups
+  backup_database.py   Registry-driven database backups
 ```
 
-Adapters are the trust boundaries for broker response formats. Tiger uses `backend/portfolio.db`; Moomoo uses `backend/moomoo.db`.
+Adapters are the trust boundaries for broker response formats. Tiger uses `backend/portfolio.db`; Moomoo uses `backend/moomoo.db`. Shared storage, aggregation, exports, health, and navigation consume only normalized models and broker capabilities.
+
+To add another broker, implement its read-only adapter, register its metadata and capabilities in `backend/brokers.py`, add its environment variables, and add fake-response normalization tests. Navigation, overview aggregation, configuration state, and backups then include it automatically.
 
 ## Export and backup
 
@@ -166,7 +174,7 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
-Tests cover financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, cached overview aggregation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
+Tests cover the broker registry, configuration and capabilities, dynamic overview iteration, financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
 
 GitHub Actions runs these checks on every push and pull request. Use `npm --prefix frontend run format` to apply frontend formatting locally.
 
