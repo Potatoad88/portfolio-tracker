@@ -293,18 +293,21 @@ class MoomooAdapterTests(unittest.TestCase):
 
 class BrokerRegistryTests(unittest.TestCase):
     def test_registry_ids_order_paths_and_capabilities(self):
-        self.assertEqual(list(BROKERS), ["tiger", "moomoo"])
+        self.assertEqual(list(BROKERS), ["tiger", "moomoo", "ibkr"])
         self.assertTrue(all(key == broker.id for key, broker in BROKERS.items()))
         self.assertEqual(BROKERS["tiger"].database_default, "backend/portfolio.db")
         self.assertTrue(BROKERS["tiger"].fetches_history)
         self.assertFalse(BROKERS["tiger"].capabilities.cash_flow_sync)
         self.assertTrue(BROKERS["moomoo"].capabilities.cash_flow_sync)
+        self.assertEqual(BROKERS["ibkr"].database_default, "backend/ibkr.db")
+        self.assertFalse(BROKERS["ibkr"].capabilities.contributions)
+        self.assertFalse(BROKERS["ibkr"].capabilities.funding_history)
 
     def test_configuration_is_derived_without_constructing_adapters(self):
         with patch.object(BROKERS["tiger"], "adapter_factory", side_effect=AssertionError("adapter called")), \
              patch.object(BROKERS["moomoo"], "adapter_factory", side_effect=AssertionError("adapter called")), \
              patch.dict(os.environ, {"TIGER_ID": "x", "TIGER_ACCOUNT": "x", "TIGER_PRIVATE_KEY_PATH": "x",
-                                     "MOOMOO_ACCOUNT_ID": "42"}, clear=True):
+                                     "MOOMOO_ACCOUNT_ID": "42", "IBKR_GATEWAY_URL": "https://localhost:5000/v1/api"}, clear=True):
             metadata = main.brokers()
         self.assertTrue(all(item["configured"] for item in metadata))
         self.assertTrue(metadata[1]["capabilities"]["cashFlowSync"])
@@ -523,6 +526,8 @@ class EndpointTests(unittest.TestCase):
             os.unlink(empty_path)
         self.assertFalse(result["complete"])
         self.assertEqual(result["missingBrokers"], ["moomoo"])
+        self.assertFalse(result["pnlComplete"])
+        self.assertIsNone(result["overallPnl"])
         self.assertEqual((result["brokerCount"], result["totalEquity"]), (1, "100"))
         self.assertFalse(result["brokers"][1]["hasData"])
 
@@ -555,7 +560,7 @@ class EndpointTests(unittest.TestCase):
             with patch.dict(BROKERS, {"extra": extra}), patch.dict(main.DATABASES, {"extra": store}):
                 result = main.overview("SGD")
             self.assertEqual((result["supportedBrokerCount"], result["brokerCount"], result["totalEquity"]),
-                             (3, 3, "350"))
+                             (4, 3, "350"))
         finally:
             os.unlink(path)
 

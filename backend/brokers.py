@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from adapter import TigerError, adapter as tiger_adapter
+from ibkr_adapter import IBKRAdapter, IBKRError
 from models import Funding
 from moomoo_adapter import MoomooAdapter, MoomooError
 
@@ -83,6 +84,13 @@ BROKERS = {
         adapter_factory=MoomooAdapter, errors=(MoomooError,),
         capabilities=BrokerCapabilities(cash_flow_sync=True),
         display_filtered_contributions=True, contribution_filter=moomoo_contributions,
+    ),
+    "ibkr": BrokerDefinition(
+        id="ibkr", display_name="IBKR", database_env="IBKR_DB_PATH",
+        database_default="backend/ibkr.db", required_env=("IBKR_GATEWAY_URL",),
+        adapter_factory=IBKRAdapter, errors=(IBKRError,),
+        capabilities=BrokerCapabilities(contributions=False, performance_history=False,
+                                        funding_history=False),
     ),
 }
 

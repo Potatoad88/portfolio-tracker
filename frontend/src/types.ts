@@ -34,7 +34,9 @@ export type Overview = {
   brokerCount: number;
   totalEquity: string;
   netContributions: string;
-  overallPnl: string;
+  overallPnl: string | null;
+  pnlComplete: boolean;
+  missingContributionBrokers: BrokerId[];
   cash: string;
   holdingsValue: string;
   stocksValue: string;

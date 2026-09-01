@@ -166,7 +166,8 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
             continue
         factor = currency_factor(currency, snap)
         rows = store.rows("SELECT market_value,asset_type FROM positions WHERE snapshot_id=?", (snap["id"],))
-        stocks = sum((Decimal(row["market_value"]) for row in rows if row["asset_type"] != "FUND"), Decimal())
+        stocks = sum((Decimal(row["market_value"]) for row in rows
+                      if row["asset_type"] in {"STK", "ETF"}), Decimal())
         funds = sum((Decimal(row["market_value"]) for row in rows if row["asset_type"] == "FUND"), Decimal())
         holdings = Decimal(snap["holdings_value"])
         unclassified = holdings - stocks - funds
@@ -186,13 +187,18 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
                                "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"),
                                "stale": is_stale(state.get("last_success"))})
     represented = sum(item["hasData"] for item in result_brokers)
+    missing_contributions = [item["broker"] for item in result_brokers if item["hasData"]
+                             and not BROKERS[item["broker"]].capabilities.contributions]
+    pnl_complete = not missing and not missing_contributions
     for item in result_brokers:
         if totals["totalEquity"] and item["hasData"]:
             item["allocationPct"] = str(Decimal(item["totalEquity"]) / totals["totalEquity"] * 100)
     return {"currency": currency, "complete": not missing, "missingBrokers": missing,
             "supportedBrokerCount": len(BROKERS), "configuredBrokerCount": configured_count,
             "brokerCount": represented, **{key: str(value) for key, value in totals.items()},
-            "overallPnl": str(totals["totalEquity"] - totals["netContributions"]), "brokers": result_brokers}
+            "pnlComplete": pnl_complete, "missingContributionBrokers": missing_contributions,
+            "overallPnl": str(totals["totalEquity"] - totals["netContributions"]) if pnl_complete else None,
+            "brokers": result_brokers}
 
 
 @app.get("/api/positions")
@@ -275,10 +281,12 @@ def export_csv(dataset: str, currency: str = Query("SGD", pattern="^(SGD|USD)$")
     spec = broker_definition(broker)
     if not spec.capabilities.exports:
         raise HTTPException(422, f"Exports are not available for {spec.display_name}")
-    sources = {"positions": lambda: positions(currency, broker), "funding": lambda: funding(currency, broker),
+    sources = {"positions": lambda: positions(currency, broker),
                "history": lambda: history(currency, broker)}
+    if spec.capabilities.funding_history:
+        sources["funding"] = lambda: funding(currency, broker)
     if dataset not in sources:
-        raise HTTPException(404, "Export must be positions, funding, or history")
+        raise HTTPException(404, f"Export must be one of: {', '.join(sources)}")
     rows = sources[dataset]()
     output = io.StringIO()
     if rows:

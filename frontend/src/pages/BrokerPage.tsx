@@ -81,7 +81,9 @@ export default function BrokerPage({
       const [s, p, f, h, st] = await Promise.all([
         api<Summary>(`/api/summary${q}`),
         api<Position[]>(`/api/positions${q}`),
-        api<Funding[]>(`/api/funding${q}`),
+        metadata.capabilities.fundingHistory
+          ? api<Funding[]>(`/api/funding${q}`)
+          : Promise.resolve([]),
         api<Point[]>(`/api/history${q}`),
         api<Status>(`/api/sync/status${b}`),
       ]);
@@ -96,7 +98,7 @@ export default function BrokerPage({
     } finally {
       setLoading(false);
     }
-  }, [broker, currency]);
+  }, [broker, currency, metadata.capabilities.fundingHistory]);
   useEffect(() => {
     load();
   }, [load]);
@@ -168,8 +170,11 @@ export default function BrokerPage({
           info: "Sum of unrealized P&L returned for listed positions.",
         },
       ];
-  const stocks = positions.filter((p) => p.asset_type !== "FUND"),
-    funds = positions.filter((p) => p.asset_type === "FUND");
+  const stocks = positions.filter((p) => ["STK", "ETF"].includes(p.asset_type)),
+    funds = positions.filter((p) => p.asset_type === "FUND"),
+    others = positions.filter(
+      (p) => !["STK", "ETF", "FUND"].includes(p.asset_type),
+    );
   const holdingsTotal = Number(summary?.holdingsValue || 0),
     lastPoint = history.length
       ? new Date(history.at(-1)!.captured_at).getTime()
@@ -234,12 +239,13 @@ export default function BrokerPage({
                   <MenuItem onClick={() => exportCsv("positions")}>
                     Positions CSV
                   </MenuItem>
-                  <MenuItem onClick={() => exportCsv("funding")}>
-                    {metadata.capabilities.cashFlowSync
-                      ? "Deposits & withdrawals"
-                      : "Funding"}{" "}
-                    CSV
-                  </MenuItem>
+                  {metadata.capabilities.fundingHistory && (
+                    <MenuItem onClick={() => exportCsv("funding")}>
+                      {metadata.capabilities.cashFlowSync
+                        ? "Deposits & withdrawals CSV"
+                        : "Funding CSV"}
+                    </MenuItem>
+                  )}
                   <MenuItem onClick={() => exportCsv("history")}>
                     Portfolio history CSV
                   </MenuItem>
@@ -462,61 +468,80 @@ export default function BrokerPage({
               empty="No stock or ETF holdings"
             />
           </Section>
-          <Section
-            title="Money market & funds"
-            subtitle={`${funds.length} current fund holding${funds.length === 1 ? "" : "s"}`}
-          >
-            <HoldingsTable
-              rows={funds}
-              currency={currency}
-              total={holdingsTotal}
-              empty="No money-market or fund holdings"
-            />
-          </Section>
-          <Section
-            title={
-              !metadata.capabilities.cashFlowSync
-                ? "Funding history"
-                : "Deposits & withdrawals"
-            }
-            subtitle={`${funding.length} verified transaction${funding.length === 1 ? "" : "s"}`}
-            initial={false}
-          >
-            <>
-              {metadata.capabilities.cashFlowSync && (
-                <Box
-                  sx={{
-                    p: 2,
-                    borderBottom: 1,
-                    borderColor: "divider",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 2,
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <Button
-                    variant="outlined"
-                    onClick={() => setCashFlowOpen(true)}
-                    disabled={!metadata.configured}
-                  >
-                    Fetch cash flow
-                  </Button>
-                  <Typography variant="body2" color="text.secondary">
-                    {"Last cash-flow sync: " +
-                      (status?.cashFlowLastSuccess
-                        ? new Date(status.cashFlowLastSuccess).toLocaleString()
-                        : "never")}
-                  </Typography>
-                </Box>
-              )}
-              <FundingTable
-                funding={funding}
+          {funds.length > 0 && (
+            <Section
+              title="Money market & funds"
+              subtitle={`${funds.length} current fund holding${funds.length === 1 ? "" : "s"}`}
+            >
+              <HoldingsTable
+                rows={funds}
                 currency={currency}
-                cashFlowSync={metadata.capabilities.cashFlowSync}
+                total={holdingsTotal}
+                empty="No money-market or fund holdings"
               />
-            </>
-          </Section>
+            </Section>
+          )}
+          {others.length > 0 && (
+            <Section
+              title="Other holdings"
+              subtitle={`${others.length} current holding${others.length === 1 ? "" : "s"}`}
+            >
+              <HoldingsTable
+                rows={others}
+                currency={currency}
+                total={holdingsTotal}
+                empty="No other holdings"
+              />
+            </Section>
+          )}
+          {metadata.capabilities.fundingHistory && (
+            <Section
+              title={
+                !metadata.capabilities.cashFlowSync
+                  ? "Funding history"
+                  : "Deposits & withdrawals"
+              }
+              subtitle={`${funding.length} verified transaction${funding.length === 1 ? "" : "s"}`}
+              initial={false}
+            >
+              <>
+                {metadata.capabilities.cashFlowSync && (
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderBottom: 1,
+                      borderColor: "divider",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 2,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Button
+                      variant="outlined"
+                      onClick={() => setCashFlowOpen(true)}
+                      disabled={!metadata.configured}
+                    >
+                      Fetch cash flow
+                    </Button>
+                    <Typography variant="body2" color="text.secondary">
+                      {"Last cash-flow sync: " +
+                        (status?.cashFlowLastSuccess
+                          ? new Date(
+                              status.cashFlowLastSuccess,
+                            ).toLocaleString()
+                          : "never")}
+                    </Typography>
+                  </Box>
+                )}
+                <FundingTable
+                  funding={funding}
+                  currency={currency}
+                  cashFlowSync={metadata.capabilities.cashFlowSync}
+                />
+              </>
+            </Section>
+          )}
           <Section
             title="Sync health"
             subtitle={`Latest ${metadata.displayName} data-source status`}

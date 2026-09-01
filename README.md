@@ -1,18 +1,19 @@
 # Portfolio Tracker
 
-A local, read-only dashboard for Tiger Brokers Prime and Moomoo SG accounts. Broker tabs share one interface while keeping their credentials, refresh operations, sync health, exports, and SQLite data isolated.
+A local, read-only dashboard for Tiger Brokers Prime, Moomoo SG, and IBKR accounts. Broker tabs share one interface while keeping their credentials, refresh operations, sync health, exports, and SQLite data isolated.
 
-The browser talks only to the local FastAPI backend. Tiger credentials remain in the backend process; Moomoo credentials remain inside Moomoo OpenD.
+The browser talks only to the local FastAPI backend. Tiger credentials remain in the backend process; Moomoo credentials remain inside Moomoo OpenD; IBKR credentials remain inside the local Client Portal Gateway.
 
 ## Features
 
 - Tiger assets, stocks, funds, funding transactions, and analytics through the official `tigeropen` SDK.
 - Moomoo SG assets and positions through the official `moomoo-api` SDK and local OpenD.
-- Separate Tiger and Moomoo tabs with persistent broker, currency, and theme preferences.
+- IBKR balances and positions through the local Client Portal Gateway using Python standard-library HTTPS.
+- Dynamic Home, Tiger, Moomoo, and IBKR tabs with persistent broker, currency, and theme preferences.
 - SGD/USD display, interactive local history, collapsible holdings, reconciliation warnings, CSV export, and SQLite backups.
 - Atomic syncs that preserve the previous broker snapshot when an upstream request fails.
 
-The application has no order, trade-unlock, deal, quote, or streaming code and binds only to localhost.
+The application has no order, trade-unlock, deal, quote, transfer, statement, Flex, or streaming code and binds only to localhost.
 
 ## API cost boundary
 
@@ -24,9 +25,14 @@ Moomoo advertises its developer platform as **“$0 Cost”** and states **“No
 
 Tiger likewise advertises free API-service access. The Tiger integration uses only account and history queries. [Tiger Open Platform](https://developer.itigerup.com/?lang=en_US&navType=quant_trading)
 
+IBKR currently describes its trading Web API as free. Paid market-data subscriptions are separate; this integration calls only portfolio accounts, ledger, and positions and never requests market data. Pricing and broker policies can change, so verify the current official terms periodically.
+
+- [IBKR Web API](https://ibkrcampus.com/campus/ibkr-api-page/web-api-account-management/)
+- [IBKR market-data subscriptions](https://ibkrcampus.com/docs/general/market-data-subscriptions/introduction)
+
 ## Setup
 
-Requires Python 3.10+, Node.js 18+, and Moomoo OpenD 10.10+ for the Moomoo tab.
+Requires Python 3.10+, Node.js 18+, Moomoo OpenD 10.10+ for Moomoo, and Java plus Client Portal Gateway for IBKR.
 
 ```sh
 python3 -m venv .venv
@@ -50,6 +56,11 @@ MOOMOO_PORT=11111
 MOOMOO_ACCOUNT_ID=your_real_sg_account_id
 MOOMOO_DB_PATH=backend/moomoo.db
 MOOMOO_MANUAL_WITHDRAWALS=
+
+IBKR_GATEWAY_URL=https://localhost:5000/v1/api
+IBKR_ACCOUNT_ID=
+IBKR_DB_PATH=backend/ibkr.db
+IBKR_VERIFY_SSL=false
 ```
 
 Keep the Tiger PEM outside the repository if practical. `.env`, PEM/key formats, databases, and backups are ignored by Git.
@@ -62,17 +73,27 @@ Keep the Tiger PEM outside the repository if practical. `.env`, PEM/key formats,
 4. Copy the real SG universal securities account ID into `MOOMOO_ACCOUNT_ID`.
 5. OpenD does not need trading to be unlocked because the tracker performs no trading operation.
 
+### IBKR Client Portal Gateway
+
+1. Install Java and download the current [Client Portal Gateway](https://ibkrcampus.com/docs/web-api/authentication/cpgw/installation-authentication) from IBKR.
+2. Extract it and start the Gateway from its directory with `bin/run.sh root/conf.yaml` on macOS/Linux (or `bin\run.bat root\conf.yaml` on Windows).
+3. Visit <https://localhost:5000>, accept the expected localhost self-signed-certificate warning, and sign in. IBKR requires browser reauthentication after the session expires, normally at least daily.
+4. Set `IBKR_GATEWAY_URL=https://localhost:5000/v1/api`. Leave `IBKR_ACCOUNT_ID` blank only when the Gateway exposes exactly one account; otherwise a failed refresh lists the account IDs you can select.
+5. Keep the Gateway on localhost. The tracker stores no IBKR username, password, session token, or trading credential.
+
+`IBKR_VERIFY_SSL=false` is accepted only for a loopback host because the local Gateway uses a self-signed certificate. Remote URLs must use normal certificate verification.
+
 ## Run
 
-Start and log in to OpenD first if you intend to refresh Moomoo. Then run:
+Start and log in to OpenD before refreshing Moomoo, and start/authenticate Client Portal Gateway before refreshing IBKR. Then run:
 
 ```sh
 ./start.sh
 ```
 
-Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact either broker. On the Moomoo tab, use **Fetch cash flow** under Deposits & withdrawals and add up to 20 known transaction dates; ordinary Refresh does not fetch cash flow.
+Open <http://127.0.0.1:5173>. Press **Refresh** to sync only the selected broker. Switching tabs, changing chart range, changing currency, exporting, or reloading the webpage reads local data and does not contact any broker. On the Moomoo tab, use **Fetch cash flow** under Deposits & withdrawals and add up to 20 known transaction dates; ordinary Refresh does not fetch cash flow.
 
-Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be closed separately.
+Press `Ctrl+C` to stop the tracker. OpenD and Client Portal Gateway are separate applications and must be stopped separately.
 
 ## Broker behavior
 
@@ -95,6 +116,18 @@ Press `Ctrl+C` to stop the tracker. OpenD is a separate application and must be 
 
 Moomoo documents a limit of 10 account-funds requests and 10 position requests per 30 seconds per account, but applies those limits only when `refresh_cache=True`. This tracker always uses `refresh_cache=False`, so refreshes read OpenD's locally synchronized cache. Cash flow is limited separately to 20 daily requests per 30 seconds, so each explicit cash-flow fetch accepts at most 20 selected dates. See the official [account-funds](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-funds.html), [positions](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-position-list.html), and [cash-flow](https://openapi.moomoo.com/moomoo-api-doc/en/trade/get-acc-cash-flow.html) documentation.
 
+### IBKR
+
+- Supports one real account with SGD as its base currency.
+- Refresh calls exactly `GET /portfolio/accounts`, `GET /portfolio/{accountId}/ledger`, and `GET /portfolio2/{accountId}/positions` through the authenticated local Gateway.
+- Shows equity, cash, holdings, account and position unrealized P&L, locally accumulated equity history, and stocks/ETFs. Unexpected asset classes remain visible under Other holdings.
+- Makes no quote, order, trade, transfer, statement, or Flex request.
+- Has no contribution, return, performance, or funding-history view in v1. Deposits and withdrawals are intentionally deferred to a future Flex integration.
+- Loading the page and switching tabs use only `backend/ibkr.db`; only Refresh contacts the Gateway.
+
+Official endpoint references: [accounts](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-all-accounts), [account ledger](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-portfolio-ledger), and [positions](https://ibkrcampus.com/docs/web-api/api-reference/trading/trading-portfolio/get-uncached-positions).
+
+
 ## Calculations
 
 The backend uses Python `Decimal` and serializes money as strings.
@@ -104,10 +137,11 @@ The backend uses Python `Decimal` and serializes money as strings.
 - **Tiger simple return** = overall P&L ÷ net contributions × 100; it is not TWR or XIRR.
 - **Moomoo net contributions** = verified SGD DDI deposits − explicit and locally confirmed bank withdrawals. Unclassified raw cash flows contribute zero.
 - **Moomoo overall P&L and simple return** use the same formulas as Tiger after that conservative classification.
-- **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is accurate only when both brokers’ deposit and withdrawal histories are complete.
+- **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is unavailable whenever a configured broker lacks cached data or a represented broker, including IBKR v1, lacks contribution history.
 - **Holdings value** = total equity − cash.
 - **Reconciliation difference** = total equity − cash − displayed positions.
 - **Moomoo unrealized P&L** = sum of unrealized P&L returned for listed positions; aggregate fund P&L is unavailable.
+- **IBKR unrealized and realized P&L** come from the SGD-base `BASE` ledger; listed position unrealized P&L is normalized to SGD with ledger exchange rates.
 
 Differences below one displayed currency unit are treated as valuation timing or rounding noise.
 
@@ -118,15 +152,15 @@ Broker-aware endpoints accept any ID returned by `GET /api/brokers`; omitting `b
 | Method | Path | Purpose | Broker request |
 | --- | --- | --- | --- |
 | `GET` | `/api/brokers` | Supported brokers, configuration state, and capabilities | No |
-| `POST` | `/api/sync?broker=moomoo` | Fetch and atomically store current portfolio data | Yes |
+| `POST` | `/api/sync?broker=ibkr` | Fetch and atomically store current portfolio data | Yes |
 | `POST` | `/api/cash-flow/sync?broker=moomoo` | Fetch up to 20 explicitly selected cash-flow dates | Yes |
 | `GET` | `/api/overview?currency=SGD` | Cached cross-broker totals, allocation, and health | No |
-| `GET` | `/api/summary?currency=SGD&broker=moomoo` | Summary and capabilities | No |
-| `GET` | `/api/positions?currency=SGD&broker=moomoo` | Latest positions | No |
+| `GET` | `/api/summary?currency=SGD&broker=ibkr` | Summary and capabilities | No |
+| `GET` | `/api/positions?currency=SGD&broker=ibkr` | Latest positions | No |
 | `GET` | `/api/funding?currency=SGD&broker=tiger` | Tiger funding history | No |
-| `GET` | `/api/history?currency=SGD&broker=moomoo` | Local chart history | No |
-| `GET` | `/api/sync/status?broker=moomoo` | Broker-specific sync health | No |
-| `GET` | `/api/export/{dataset}?broker=moomoo` | Broker-specific CSV | No |
+| `GET` | `/api/history?currency=SGD&broker=ibkr` | Local chart history | No |
+| `GET` | `/api/sync/status?broker=ibkr` | Broker-specific sync health | No |
+| `GET` | `/api/export/{dataset}?broker=ibkr` | Broker-specific CSV | No |
 
 Only SGD and USD are accepted as display currencies.
 
@@ -136,6 +170,7 @@ Only SGD and USD are accepted as display currencies.
 backend/
   adapter.py          Tiger read-only normalization
   moomoo_adapter.py   Moomoo/OpenD read-only normalization
+  ibkr_adapter.py     IBKR Gateway read-only normalization
   brokers.py          Broker registry, capabilities, and contribution rules
   calculations.py     Contribution and performance formulas
   database.py         SQLite schema, transactions, and deduplication
@@ -152,7 +187,7 @@ scripts/
   backup_database.py   Registry-driven database backups
 ```
 
-Adapters are the trust boundaries for broker response formats. Tiger uses `backend/portfolio.db`; Moomoo uses `backend/moomoo.db`. Shared storage, aggregation, exports, health, and navigation consume only normalized models and broker capabilities.
+Adapters are the trust boundaries for broker response formats. Tiger uses `backend/portfolio.db`; Moomoo uses `backend/moomoo.db`; IBKR uses `backend/ibkr.db`. Shared storage, aggregation, exports, health, and navigation consume only normalized models and broker capabilities.
 
 To add another broker, implement its read-only adapter, register its metadata and capabilities in `backend/brokers.py`, add its environment variables, and add fake-response normalization tests. Navigation, overview aggregation, configuration state, and backups then include it automatically.
 
@@ -174,17 +209,19 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v
 npm --prefix frontend run build
 ```
 
-Tests cover the broker registry, configuration and capabilities, dynamic overview iteration, financial signs, Tiger and Moomoo normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo tests use fake OpenD responses and make no broker request.
+Tests cover the broker registry, configuration and capabilities, dynamic overview iteration, financial signs, Tiger, Moomoo, and IBKR normalization, mixed-currency conversion, aggregate funds, context closure, broker isolation, rollback, deduplication, migrations, reconciliation, history, and CSV export. Moomoo and IBKR tests use fake upstream responses and make no broker request.
 
 GitHub Actions runs these checks on every push and pull request. Use `npm --prefix frontend run format` to apply frontend formatting locally.
 
 ## Troubleshooting
 
+- **IBKR Gateway unavailable or login required**: start Client Portal Gateway, visit <https://localhost:5000>, authenticate, and retry. A failed refresh preserves cached data.
+- **Several IBKR accounts are visible**: set `IBKR_ACCOUNT_ID` to one of the IDs listed by the refresh error.
 - **Moomoo OpenD connection failed**: start OpenD, log in, verify port `11111`, and keep it on localhost.
 - **Account ID is not available**: confirm `MOOMOO_ACCOUNT_ID` is the real SG securities account exposed by the logged-in OpenD user.
 - **Moomoo data appears unchanged**: position and account reads intentionally use OpenD's synchronized cache. Restart or refresh OpenD if its cache is stale.
 - **Tiger `Incorrect padding`**: point `TIGER_PRIVATE_KEY_PATH` at the original PEM rather than pasting an altered one-line key.
-- **Certificate verification failed**: reinstall requirements and use `./start.sh`, which supplies Certifi's CA bundle; never disable TLS verification.
+- **Tiger certificate verification failed**: reinstall requirements and use `./start.sh`, which supplies Certifi's CA bundle; do not disable verification for Tiger.
 - **Stale warning**: the selected broker's last successful sync is older than `TIGER_STALE_MINUTES`.
 - **Reconciliation warning**: refresh once; if it persists, the broker may report an unsupported or in-transit asset outside returned positions.
 

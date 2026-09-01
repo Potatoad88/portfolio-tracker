@@ -90,6 +90,16 @@ export default function HomePage({
               yet.
             </Alert>
           )}
+          {!overview.pnlComplete && overview.brokerCount > 0 && (
+            <Alert severity="info">
+              Overall P&amp;L is unavailable because contribution history is
+              incomplete
+              {overview.missingContributionBrokers.length
+                ? ` for ${overview.missingContributionBrokers.map(title).join(" and ")}`
+                : ""}
+              . IBKR deposits and withdrawals are not connected.
+            </Alert>
+          )}
           <Box>
             <Typography variant="h4">Overall portfolio</Typography>
             <Typography color="text.secondary" sx={{ mt: 0.5 }}>
@@ -121,13 +131,23 @@ export default function HomePage({
                   },
                   {
                     label: "Net contributions",
-                    value: money(overview.netContributions, currency),
+                    value: overview.pnlComplete
+                      ? money(overview.netContributions, currency)
+                      : "Incomplete",
                   },
                   {
                     label: "Overall P&L",
-                    value: `${Number(overview.overallPnl) >= 0 ? "+" : ""}${money(overview.overallPnl, currency)}`,
-                    tone: Number(overview.overallPnl),
-                    info: "Combined total equity − combined net contributions. Accuracy depends on complete deposit and withdrawal history for every represented broker.",
+                    value:
+                      overview.overallPnl === null
+                        ? "Unavailable"
+                        : `${Number(overview.overallPnl) >= 0 ? "+" : ""}${money(overview.overallPnl, currency)}`,
+                    tone:
+                      overview.overallPnl === null
+                        ? undefined
+                        : Number(overview.overallPnl),
+                    info: overview.pnlComplete
+                      ? "Combined total equity − combined net contributions."
+                      : "Unavailable until every represented broker has contribution history. IBKR deposits and withdrawals are not connected.",
                   },
                   { label: "Cash", value: money(overview.cash, currency) },
                   {
