@@ -33,6 +33,7 @@ const emptyOverview = (brokers: BrokerMetadata[]): Overview => ({
     lastSuccess: null,
     lastError: null,
     stale: true,
+    audit: null,
   })),
 });
 

@@ -152,11 +152,14 @@ The backend uses Python `Decimal` and serializes money as strings.
 - **IBKR net contributions** = Flex Statement of Funds deposits − withdrawals, converted to SGD using each row’s reported FX-to-base rate.
 - **Home overall P&L** = combined cached equity − combined net contributions, converted with each broker’s stored FX rate. It is unavailable whenever a configured broker lacks cached data or a represented broker lacks complete contribution history.
 - **Holdings value** = total equity − cash.
-- **Reconciliation difference** = total equity − cash − displayed positions.
+- **Unclassified holdings** = reported holdings − all returned positions. “Other returned positions” have an explicit non-stock/non-fund asset type; unclassified holdings have no matching position row.
+- **Equity composition difference** = total equity − cash − reported holdings.
+- **Reconciliation difference** = total equity − cash − all returned positions.
+- The collapsed **Calculation audit** on Home shows these formulas and the deposit, withdrawal, fee, refund, contribution, and P&L totals for each broker. It reads cached databases only and never triggers a broker request.
 - **Moomoo unrealized P&L** = sum of unrealized P&L returned for listed positions; aggregate fund P&L is unavailable.
 - **IBKR unrealized and realized P&L** come from the SGD-base `BASE` ledger; listed position unrealized P&L is normalized to SGD with ledger exchange rates.
 
-Differences below one displayed currency unit are treated as valuation timing or rounding noise.
+A broker is marked reconciled when both its unclassified-holdings and equity-composition differences are at most SGD 1.00 before display-currency conversion. Audit warnings are diagnostic only; they never modify or discard stored broker data.
 
 ## Local API
 

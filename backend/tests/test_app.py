@@ -11,7 +11,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from brokers import BROKERS, BrokerCapabilities, BrokerDefinition, definition
-from calculations import net_contributions, performance
+from calculations import contribution_breakdown, net_contributions, performance, reconciliation_breakdown
 from adapter import LiveTigerAdapter, _funds_are_excluded
 from database import Database
 from models import Funding, HistoryPoint, Position, Snapshot
@@ -61,6 +61,41 @@ class CalculationTests(unittest.TestCase):
     def test_non_sgd_rejected(self):
         with self.assertRaisesRegex(ValueError, "only SGD"):
             net_contributions([Funding("x", "DEPOSIT", "USD", Decimal("1"), date.today(), True)])
+
+    def test_contribution_breakdown_explains_net_total(self):
+        pending = Funding("pending", "1", "SGD", Decimal("999"), date.today(), False)
+        result = contribution_breakdown([*FUNDING, pending])
+        self.assertEqual(result, {
+            "deposits": Decimal("100"), "withdrawals": Decimal("10"),
+            "fees": Decimal("2"), "refunds": Decimal("1"),
+            "net_contributions": Decimal("89"),
+        })
+
+    def test_reconciliation_breakdown_preserves_signed_gaps_and_other_positions(self):
+        positions = [
+            {"market_value": "60", "asset_type": "STK"},
+            {"market_value": "20", "asset_type": "FUND"},
+            {"market_value": "5", "asset_type": "BOND"},
+        ]
+        result = reconciliation_breakdown(Decimal("100"), Decimal("10"), Decimal("88"), positions)
+        self.assertEqual(result["stocks_value"], Decimal("60"))
+        self.assertEqual(result["funds_value"], Decimal("20"))
+        self.assertEqual(result["other_positions_value"], Decimal("5"))
+        self.assertEqual(result["position_total"], Decimal("85"))
+        self.assertEqual(result["unclassified_holdings_value"], Decimal("3"))
+        self.assertEqual(result["equity_composition_difference"], Decimal("2"))
+        self.assertEqual(result["reconciliation_difference"], Decimal("5"))
+        self.assertFalse(result["reconciled"])
+        negative = reconciliation_breakdown(Decimal("90"), Decimal("10"), Decimal("75"), positions)
+        self.assertEqual(negative["unclassified_holdings_value"], Decimal("-10"))
+        self.assertEqual(negative["reconciliation_difference"], Decimal("-5"))
+
+    def test_reconciliation_tolerance_includes_exactly_one_sgd(self):
+        positions = [{"market_value": "89", "asset_type": "STK"}]
+        exact = reconciliation_breakdown(Decimal("101"), Decimal("10"), Decimal("90"), positions)
+        over = reconciliation_breakdown(Decimal("101.01"), Decimal("10"), Decimal("90"), positions)
+        self.assertTrue(exact["reconciled"])
+        self.assertFalse(over["reconciled"])
 
     def test_tiger_numeric_funding_fields(self):
         parse = LiveTigerAdapter.__new__(LiveTigerAdapter)._funding
@@ -505,6 +540,36 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertEqual(result["brokers"][0]["allocationPct"], str(Decimal("100") / Decimal("300") * 100))
 
+    def test_overview_exposes_per_broker_calculation_audit(self):
+        audit = main.overview("SGD")["brokers"][0]["audit"]
+        self.assertEqual((audit["totalEquity"], audit["cash"], audit["reportedHoldingsValue"]),
+                         ("100", "88", "12"))
+        self.assertEqual((audit["stocksValue"], audit["fundsValue"], audit["otherPositionsValue"]),
+                         ("12", "0", "0"))
+        self.assertEqual((audit["positionTotal"], audit["unclassifiedHoldingsValue"],
+                          audit["equityCompositionDifference"], audit["reconciliationDifference"]),
+                         ("12", "0", "0", "0"))
+        self.assertEqual((audit["deposits"], audit["withdrawals"], audit["fees"], audit["refunds"],
+                          audit["netContributions"], audit["overallPnl"]),
+                         ("100", "10", "2", "1", "89", "11"))
+        self.assertTrue(audit["reconciled"])
+        self.assertTrue(audit["contributionsComplete"])
+
+    def test_overview_audit_converts_values_and_keeps_status_in_sgd(self):
+        audit = main.overview("USD")["brokers"][0]["audit"]
+        self.assertEqual((audit["totalEquity"], audit["deposits"], audit["overallPnl"]),
+                         ("75.00", "75.00", "8.25"))
+        self.assertTrue(audit["reconciled"])
+
+    def test_overview_audit_keeps_assets_when_contributions_are_incomplete(self):
+        main.DATABASES["ibkr"].sync(replace(snapshot(), total_equity=Decimal("50"), cash=Decimal("20"),
+                                            holdings_value=Decimal("30"), positions=()), [], [])
+        audit = main.overview("SGD")["brokers"][2]["audit"]
+        self.assertEqual((audit["totalEquity"], audit["unclassifiedHoldingsValue"]), ("50", "30"))
+        self.assertFalse(audit["contributionsComplete"])
+        self.assertIsNone(audit["deposits"])
+        self.assertIsNone(audit["overallPnl"])
+
     def test_overview_hides_immaterial_unclassified_rounding(self):
         main.DATABASES["tiger"].sync(replace(snapshot(), holdings_value=Decimal("12.50")), [], [])
         main.DATABASES["moomoo"].sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
@@ -515,7 +580,8 @@ class EndpointTests(unittest.TestCase):
         main.DATABASES["moomoo"].sync(replace(snapshot(), total_equity=Decimal("200"), cash=Decimal("50"),
                                     holdings_value=Decimal("150"), positions=(), sgd_to_usd=Decimal("0.5")), [], [])
         with patch.object(BROKERS["tiger"], "adapter_factory", side_effect=AssertionError("adapter called")), \
-             patch.object(BROKERS["moomoo"], "adapter_factory", side_effect=AssertionError("adapter called")):
+             patch.object(BROKERS["moomoo"], "adapter_factory", side_effect=AssertionError("adapter called")), \
+             patch.object(BROKERS["ibkr"], "adapter_factory", side_effect=AssertionError("adapter called")):
             result = main.overview("USD")
         self.assertEqual((result["totalEquity"], result["netContributions"], result["overallPnl"]),
                          ("175.00", "66.75", "108.25"))

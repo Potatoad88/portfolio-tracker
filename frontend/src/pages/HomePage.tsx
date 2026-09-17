@@ -6,6 +6,7 @@ import {
   CardContent,
   Chip,
   Container,
+  Divider,
   IconButton,
   Paper,
   Stack,
@@ -14,7 +15,128 @@ import {
 } from "@mui/material";
 import { money } from "../api";
 import AppHeader from "../components/AppHeader";
-import type { BrokerMetadata, Currency, Overview, View } from "../types";
+import { Section } from "../components/Portfolio";
+import type {
+  BrokerMetadata,
+  Currency,
+  Overview,
+  OverviewBroker,
+  View,
+} from "../types";
+
+function AuditRow({ label, value }: { label: string; value: string }) {
+  return (
+    <Stack direction="row" justifyContent="space-between" spacing={2}>
+      <Typography variant="body2" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography variant="body2" fontWeight={650} textAlign="right">
+        {value}
+      </Typography>
+    </Stack>
+  );
+}
+
+function AuditCard({
+  broker,
+  currency,
+}: {
+  broker: OverviewBroker;
+  currency: Currency;
+}) {
+  const audit = broker.audit;
+  if (!audit) return null;
+  const value = (amount: string | null) =>
+    amount === null ? "Unavailable" : money(amount, currency);
+  return (
+    <Card variant="outlined">
+      <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+        >
+          <Typography variant="h6">{broker.displayName}</Typography>
+          <Chip
+            size="small"
+            label={audit.reconciled ? "Reconciled" : "Needs attention"}
+            color={audit.reconciled ? "success" : "warning"}
+            variant="outlined"
+          />
+        </Stack>
+        <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
+          Account reconciliation
+        </Typography>
+        <Stack spacing={0.75}>
+          <AuditRow label="Total equity" value={value(audit.totalEquity)} />
+          <AuditRow label="Less cash" value={value(audit.cash)} />
+          <AuditRow
+            label="Less returned positions"
+            value={value(audit.positionTotal)}
+          />
+          <AuditRow
+            label="Signed reconciliation difference"
+            value={value(audit.reconciliationDifference)}
+          />
+        </Stack>
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+          Position coverage
+        </Typography>
+        <Stack spacing={0.75}>
+          <AuditRow
+            label="Reported holdings"
+            value={value(audit.reportedHoldingsValue)}
+          />
+          <AuditRow label="Stocks & ETFs" value={value(audit.stocksValue)} />
+          <AuditRow
+            label="Money market & funds"
+            value={value(audit.fundsValue)}
+          />
+          <AuditRow
+            label="Other returned positions"
+            value={value(audit.otherPositionsValue)}
+          />
+          <AuditRow
+            label="Unclassified holdings"
+            value={value(audit.unclassifiedHoldingsValue)}
+          />
+          <AuditRow
+            label="Equity composition difference"
+            value={value(audit.equityCompositionDifference)}
+          />
+        </Stack>
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>
+          Contribution-based P&amp;L
+        </Typography>
+        {audit.contributionsComplete ? (
+          <Stack spacing={0.75}>
+            <AuditRow label="Deposits" value={value(audit.deposits)} />
+            <AuditRow
+              label="Less withdrawals"
+              value={value(audit.withdrawals)}
+            />
+            <AuditRow label="Less withdrawal fees" value={value(audit.fees)} />
+            <AuditRow label="Plus refunds" value={value(audit.refunds)} />
+            <AuditRow
+              label="Net contributions"
+              value={value(audit.netContributions)}
+            />
+            <AuditRow
+              label="Total equity − net contributions"
+              value={value(audit.overallPnl)}
+            />
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            Unavailable until contribution history is complete for this broker.
+          </Typography>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function HomePage({
   brokers,
@@ -380,6 +502,45 @@ export default function HomePage({
               </Card>
             ))}
           </Box>
+          <Section
+            title="Calculation audit"
+            subtitle={
+              overview.brokerCount === 0
+                ? "No cached data"
+                : overview.brokers
+                      .filter((item) => item.audit)
+                      .every((item) => item.audit?.reconciled)
+                  ? "All represented brokers reconcile"
+                  : "One or more brokers need attention"
+            }
+            initial={false}
+          >
+            <Box sx={{ p: { xs: 2, md: 2.5 } }}>
+              {overview.brokerCount === 0 ? (
+                <Alert severity="info">
+                  Run a broker sync to create the first calculation audit.
+                </Alert>
+              ) : (
+                <Box
+                  sx={{
+                    display: "grid",
+                    gridTemplateColumns: { xs: "1fr", lg: "repeat(2,1fr)" },
+                    gap: 2,
+                  }}
+                >
+                  {overview.brokers
+                    .filter((item) => item.audit)
+                    .map((item) => (
+                      <AuditCard
+                        key={item.broker}
+                        broker={item}
+                        currency={currency}
+                      />
+                    ))}
+                </Box>
+              )}
+            </Box>
+          </Section>
         </Stack>
       </Container>
     </Box>

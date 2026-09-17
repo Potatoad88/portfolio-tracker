@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from brokers import BROKERS, definition, requested_history_start
-from calculations import net_contributions, performance
+from calculations import contribution_breakdown, net_contributions, performance, reconciliation_breakdown
 from database import Database
 from models import Funding
 
@@ -164,14 +164,15 @@ def summary(currency: str = Query("SGD", pattern="^(SGD|USD)$"), broker: str = "
     if not snap:
         return {"empty": True, "supportsContributions": contributions_supported}
     factor = currency_factor(currency, snap)
-    position_total = sum((Decimal(row["market_value"]) for row in store.rows(
-        "SELECT market_value FROM positions WHERE snapshot_id=?", (snap["id"],))), Decimal())
+    position_rows = store.rows("SELECT market_value,asset_type FROM positions WHERE snapshot_id=?", (snap["id"],))
+    reconciliation = reconciliation_breakdown(Decimal(snap["total_equity"]), Decimal(snap["cash"]),
+                                              Decimal(snap["holdings_value"]), position_rows)
     result = {"empty": False, "broker": broker, "supportsContributions": contributions_supported,
               "currency": currency, "totalEquity": converted(snap["total_equity"], factor),
               "cash": converted(snap["cash"], factor), "holdingsValue": converted(snap["holdings_value"], factor),
               "unrealizedPnl": converted(snap["unrealized_pnl"], factor),
               "realizedPnl": converted(snap["realized_pnl"], factor),
-              "reconciliationDifference": str((Decimal(snap["total_equity"]) - Decimal(snap["cash"]) - position_total) * factor),
+              "reconciliationDifference": str(reconciliation["reconciliation_difference"] * factor),
               "capturedAt": snap["captured_at"]}
     if contributions_supported:
         try:
@@ -201,32 +202,64 @@ def overview(currency: str = Query("SGD", pattern="^(SGD|USD)$")):
             result_brokers.append({"broker": spec.id, "displayName": spec.display_name,
                                    "configured": spec.configured, "hasData": False, "totalEquity": "0",
                                    "allocationPct": "0", "lastSuccess": state.get("last_success"),
-                                   "lastError": state.get("last_error"), "stale": True})
+                                   "lastError": state.get("last_error"), "stale": True, "audit": None})
             continue
         factor = currency_factor(currency, snap)
         rows = store.rows("SELECT market_value,asset_type FROM positions WHERE snapshot_id=?", (snap["id"],))
-        stocks = sum((Decimal(row["market_value"]) for row in rows
-                      if row["asset_type"] in {"STK", "ETF"}), Decimal())
-        funds = sum((Decimal(row["market_value"]) for row in rows if row["asset_type"] == "FUND"), Decimal())
+        equity = Decimal(snap["total_equity"])
+        cash = Decimal(snap["cash"])
         holdings = Decimal(snap["holdings_value"])
+        reconciliation = reconciliation_breakdown(equity, cash, holdings, rows)
+        stocks = reconciliation["stocks_value"]
+        funds = reconciliation["funds_value"]
         unclassified = holdings - stocks - funds
         if abs(unclassified) < Decimal("1"):
             unclassified = Decimal()
         contributions_complete = has_contribution_coverage(store, spec)
-        contributions = (net_contributions(contribution_items(store, spec.id))
-                         if contributions_complete else Decimal())
-        values = {"totalEquity": Decimal(snap["total_equity"]), "netContributions": contributions,
-                  "cash": Decimal(snap["cash"]), "holdingsValue": holdings,
+        contributions_items = contribution_items(store, spec.id) if contributions_complete else []
+        contributions = net_contributions(contributions_items) if contributions_complete else Decimal()
+        contributions_audit = contribution_breakdown(contributions_items) if contributions_complete else None
+        values = {"totalEquity": equity, "netContributions": contributions,
+                  "cash": cash, "holdingsValue": holdings,
                   "stocksValue": stocks, "fundsValue": funds,
                   "otherHoldingsValue": max(unclassified, Decimal())}
         for key, value in values.items():
             totals[key] += value * factor
+        audit = {
+            "reconciled": reconciliation["reconciled"],
+            "totalEquity": str(equity * factor),
+            "cash": str(cash * factor),
+            "reportedHoldingsValue": str(holdings * factor),
+            "stocksValue": str(stocks * factor),
+            "fundsValue": str(funds * factor),
+            "otherPositionsValue": str(reconciliation["other_positions_value"] * factor),
+            "positionTotal": str(reconciliation["position_total"] * factor),
+            "unclassifiedHoldingsValue": str(reconciliation["unclassified_holdings_value"] * factor),
+            "equityCompositionDifference": str(reconciliation["equity_composition_difference"] * factor),
+            "reconciliationDifference": str(reconciliation["reconciliation_difference"] * factor),
+            "contributionsComplete": contributions_complete,
+            "deposits": None,
+            "withdrawals": None,
+            "fees": None,
+            "refunds": None,
+            "netContributions": None,
+            "overallPnl": None,
+        }
+        if contributions_audit:
+            audit.update({
+                "deposits": str(contributions_audit["deposits"] * factor),
+                "withdrawals": str(contributions_audit["withdrawals"] * factor),
+                "fees": str(contributions_audit["fees"] * factor),
+                "refunds": str(contributions_audit["refunds"] * factor),
+                "netContributions": str(contributions * factor),
+                "overallPnl": str((equity - contributions) * factor),
+            })
         result_brokers.append({"broker": spec.id, "displayName": spec.display_name,
                                "configured": spec.configured, "hasData": True,
                                "totalEquity": str(values["totalEquity"] * factor), "allocationPct": "0",
                                "lastSuccess": state.get("last_success"), "lastError": state.get("last_error"),
                                "stale": is_stale(state.get("last_success")),
-                               "contributionComplete": contributions_complete})
+                               "contributionComplete": contributions_complete, "audit": audit})
     represented = sum(item["hasData"] for item in result_brokers)
     missing_contributions = [item["broker"] for item in result_brokers if item["hasData"]
                              and not item.get("contributionComplete", False)]

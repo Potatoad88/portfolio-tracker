@@ -16,6 +16,26 @@ export type BrokerMetadata = {
   configured: boolean;
   capabilities: BrokerCapabilities;
 };
+export type BrokerAudit = {
+  reconciled: boolean;
+  totalEquity: string;
+  cash: string;
+  reportedHoldingsValue: string;
+  stocksValue: string;
+  fundsValue: string;
+  otherPositionsValue: string;
+  positionTotal: string;
+  unclassifiedHoldingsValue: string;
+  equityCompositionDifference: string;
+  reconciliationDifference: string;
+  contributionsComplete: boolean;
+  deposits: string | null;
+  withdrawals: string | null;
+  fees: string | null;
+  refunds: string | null;
+  netContributions: string | null;
+  overallPnl: string | null;
+};
 export type OverviewBroker = {
   broker: BrokerId;
   displayName: string;
@@ -26,6 +46,7 @@ export type OverviewBroker = {
   lastSuccess: string | null;
   lastError: string | null;
   stale: boolean;
+  audit: BrokerAudit | null;
 };
 export type Overview = {
   complete: boolean;
